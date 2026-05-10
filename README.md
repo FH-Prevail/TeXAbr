@@ -287,6 +287,10 @@ TeXAbr/
 | Update model | Electron auto-update | `git pull && sudo ./install.sh` |
 | Platforms | Win / macOS / Linux | Linux server (any browser client) |
 
+## Disclaimer
+
+TeXAbr is provided as-is, without warranty. It works well for the deployments we run it on, but every environment is different — vet the configuration, keep the host patched, and operate within your organisation's policies. See [LICENSE](LICENSE) for the binding legal text.
+
 ## License
 
-MIT, same as Openotex.
+MIT, same as Openotex. See [LICENSE](LICENSE) for the full text.
