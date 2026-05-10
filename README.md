@@ -2,7 +2,7 @@
 
 **A self-hosted, multi-user LaTeX editor for Linux.**
 
-TeXAbr is the network-native sibling of [Openotex](../README.md). Where Openotex is a desktop Electron app that compiles LaTeX locally on each user's machine, TeXAbr is a single Linux server that hosts the editor, owns the LaTeX toolchain, fonts, and project files, and serves the editor to any browser on the network.
+TeXAbr is the network-native sibling of [Openotex](https://github.com/FH-Prevail/Openotex). Where Openotex is a desktop Electron app that compiles LaTeX locally on each user's machine, TeXAbr is a single Linux server that hosts the editor, owns the LaTeX toolchain, fonts, and project files, and serves the editor to any browser on the network.
 
 ```
 ┌──────────────────────────────┐         ┌──────────────────────────────┐
@@ -78,7 +78,7 @@ TeXAbr targets that gap. **Server-first**: install once, every user just needs a
 ## Quick start
 
 ```bash
-git clone <your fork>
+git clone https://github.com/FH-Prevail/TeXAbr.git
 cd TeXAbr
 sudo ./install.sh
 ```
