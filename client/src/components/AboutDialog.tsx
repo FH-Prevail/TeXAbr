@@ -9,7 +9,7 @@ interface AboutDialogProps {
   onClose: () => void;
 }
 
-const DOCS_URL = 'https://github.com/FH-Prevail/Openotex/tree/main/TeXAbr';
+const DOCS_URL = 'https://github.com/FH-Prevail/TeXAbr';
 
 const AboutDialog: React.FC<AboutDialogProps> = ({ isOpen, onClose }) => {
   const [serverVersion, setServerVersion] = React.useState<string>(APP_VERSION_LABEL);
@@ -23,8 +23,15 @@ const AboutDialog: React.FC<AboutDialogProps> = ({ isOpen, onClose }) => {
 
   if (!isOpen) return null;
 
+  // Try the Electron-style shim first so this component still works inside
+  // Openotex; fall back to a plain new-tab open in the TeXAbr browser build.
   const openDocs = () => {
-    void (window as any).api?.openExternal?.(DOCS_URL);
+    const electronApi = (window as { api?: { openExternal?: (url: string) => unknown } }).api;
+    if (electronApi?.openExternal) {
+      void electronApi.openExternal(DOCS_URL);
+    } else {
+      window.open(DOCS_URL, '_blank', 'noopener,noreferrer');
+    }
   };
 
   return (
@@ -39,8 +46,8 @@ const AboutDialog: React.FC<AboutDialogProps> = ({ isOpen, onClose }) => {
         <div className="about-content">
           <div className="about-logo">
             <img
-              src="assets/openotex-icon.png"
-              alt={`${APP_NAME} Logo`}
+              src="/logo.png"
+              alt={`${APP_NAME} logo`}
               className="logo-image"
             />
           </div>
@@ -84,7 +91,7 @@ const AboutDialog: React.FC<AboutDialogProps> = ({ isOpen, onClose }) => {
           </div>
 
           <div className="about-footer">
-            <p>&copy; 2026 Openotex team.</p>
+            <p>&copy; 2026 TeXAbr team.</p>
           </div>
         </div>
       </div>
