@@ -1,0 +1,339 @@
+.preview {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background-color: var(--color-panel);
+  color: var(--color-text-primary);
+}
+
+.preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  background-color: var(--color-bg-secondary);
+}
+
+.preview-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.preview-status-indicator {
+  font-size: 12px;
+  color: var(--color-accent);
+}
+
+.preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preview-controls button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--color-border-muted);
+  background-color: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 0;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.preview-controls button svg {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.preview-controls button:hover:not(:disabled) {
+  background-color: var(--color-hover-bg);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.preview-controls button:disabled {
+  color: var(--color-text-muted);
+  border-color: var(--color-border-muted);
+  cursor: not-allowed;
+}
+
+.preview-controls .preview-zoom {
+  min-width: 42px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.preview-body {
+  flex: 1;
+  overflow: hidden;
+  background-color: var(--color-bg-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.preview-body iframe {
+  border: none;
+  width: 100%;
+  height: 100%;
+}
+
+.preview-engine-warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  background-color: var(--color-warning-bg, rgba(245, 158, 11, 0.12));
+  color: var(--color-warning-text, #f6c56f);
+  font-size: 12px;
+}
+
+/* pdfjs canvas rendering — fills the preview body and scrolls independently */
+.pdf-canvas-container {
+  width: 100%;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: auto;
+  padding: 16px 0;
+  box-sizing: border-box;
+  background-color: var(--color-bg-primary);
+}
+
+.pdf-page-canvas {
+  display: block;
+  margin: 0 auto 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.preview-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--color-text-muted);
+  font-size: 14px;
+}
+
+.preview-error {
+  background-color: var(--color-panel);
+  border-top: 1px solid var(--color-border-subtle);
+  padding: 16px;
+  color: var(--color-danger-text);
+}
+
+.preview-error h4 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+}
+
+.preview-error pre {
+  background-color: var(--color-bg-primary);
+  padding: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-danger-border);
+  font-family: 'Monaco', 'Consolas', monospace;
+  font-size: 12px;
+  overflow-x: auto;
+  margin: 0;
+}
+
+.preview-diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.preview-diagnostic {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 6px;
+  background-color: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.preview-diagnostic:disabled {
+  cursor: default;
+}
+
+.preview-diagnostic:not(:disabled):hover {
+  border-color: var(--color-accent);
+  background-color: var(--color-hover-bg);
+}
+
+.preview-diagnostic-severity {
+  text-transform: uppercase;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.preview-diagnostic-error .preview-diagnostic-severity {
+  color: var(--color-danger-text);
+}
+
+.preview-diagnostic-warning .preview-diagnostic-severity {
+  color: var(--color-warning-text, #f6c56f);
+}
+
+.preview-diagnostic-location {
+  color: var(--color-text-secondary);
+  font-family: 'Monaco', 'Consolas', monospace;
+  font-size: 11px;
+}
+
+.preview-diagnostic-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.markdown-preview {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background-color: var(--color-paper);
+  color: var(--color-paper-text);
+  overflow: hidden;
+}
+
+.markdown-header {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  background-color: var(--color-bg-secondary);
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.markdown-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 22px 28px;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 24px 0 12px;
+  font-weight: 600;
+}
+
+.markdown-body p {
+  margin: 12px 0;
+  line-height: 1.65;
+}
+
+.markdown-body pre {
+  background-color: var(--color-surface-alt);
+  padding: 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.markdown-body code {
+  font-family: 'Monaco', 'Fira Code', monospace;
+  background-color: var(--color-surface-alt);
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 20px;
+  margin: 12px 0;
+}
+
+.markdown-body blockquote {
+  border-left: 3px solid var(--color-border-strong);
+  margin: 12px 0;
+  padding-left: 12px;
+  color: var(--color-text-secondary);
+}
+
+.placeholder-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  background-color: var(--color-bg-primary);
+}
+
+.placeholder-message {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--color-text-muted);
+}
+
+.latex-install {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  text-align: center;
+  padding: 32px;
+}
+
+.latex-status {
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.latex-status h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.latex-status p {
+  margin: 0;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.latex-install-btn {
+  margin-top: 8px;
+  padding: 8px 16px;
+  border-radius: 6px;
+  border: none;
+  background-color: var(--color-accent);
+  color: var(--color-bg-primary);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.latex-install-btn:hover {
+  background-color: var(--color-accent-hover);
+}

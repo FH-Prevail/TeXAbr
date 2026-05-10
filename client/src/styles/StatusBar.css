@@ -1,0 +1,100 @@
+.status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: var(--color-panel);
+  border-top: 1px solid var(--color-border-strong);
+  padding: 6px 12px;
+  height: 32px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.status-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 1;
+}
+
+.status-bar-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: 0 20px;
+}
+
+.status-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all 0.2s;
+  color: var(--color-text-muted);
+}
+
+.status-item:hover {
+  background-color: var(--color-hover-bg);
+}
+
+.status-label {
+  font-weight: 500;
+}
+
+.status-value {
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.status-value.on {
+  color: #4ade80;
+  background-color: rgba(74, 222, 128, 0.15);
+}
+
+.status-value.off {
+  color: #f87171;
+  background-color: rgba(248, 113, 113, 0.15);
+}
+
+.status-info {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  opacity: 0.8;
+}
+
+.status-message {
+  font-size: 12px;
+  color: var(--color-text-primary);
+  font-weight: 500;
+  background-color: rgba(74, 222, 128, 0.15);
+  padding: 4px 12px;
+  border-radius: 4px;
+  animation: fadeIn 0.3s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

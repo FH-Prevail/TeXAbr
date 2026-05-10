@@ -1,0 +1,35 @@
+{
+  "host": "0.0.0.0",
+  "port": 8217,
+
+  "https": {
+    "enabled": false,
+    "cert": null,
+    "key": null
+  },
+
+  "dataDir": "/var/lib/texabr",
+
+  "auth": {
+    "jwtSecret": "REPLACE_ME_WITH_A_SECRET",
+    "sessionTtlHours": 168,
+    "bootstrapToken": null
+  },
+
+  "registration": {
+    "open": false,
+    "requireInvite": true
+  },
+
+  "latex": {
+    "engines": ["pdflatex", "xelatex", "lualatex"],
+    "defaultEngine": "pdflatex",
+    "timeoutMs": 60000,
+    "maxConcurrent": 4
+  },
+
+  "limits": {
+    "maxProjectMb": 200,
+    "maxFileMb": 25
+  }
+}

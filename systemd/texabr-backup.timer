@@ -1,0 +1,15 @@
+[Unit]
+Description=TeXAbr backup timer
+Documentation=https://github.com/FH-Prevail/TeXAbr
+
+[Timer]
+# Default: nightly at 03:00. Override with the admin panel's
+# backup.scheduleOnCalendar (which writes to a drop-in) or by editing
+# /etc/systemd/system/texabr-backup.timer.d/override.conf.
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+RandomizedDelaySec=10m
+Unit=texabr-backup.service
+
+[Install]
+WantedBy=timers.target

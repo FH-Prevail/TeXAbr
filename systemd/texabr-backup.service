@@ -1,0 +1,51 @@
+[Unit]
+Description=TeXAbr backup (one-shot)
+After=texabr.service
+Requires=texabr.service
+
+[Service]
+# One-shot run of the backup CLI. Spawns restic; no bwrap involved, so this
+# unit can keep all of systemd's hardening — none of the bubblewrap-vs-systemd
+# conflicts that texabr.service has to work around apply here.
+Type=oneshot
+User=texabr
+Group=texabr
+WorkingDirectory=/opt/texabr/server
+Environment=NODE_ENV=production
+Environment=TEXABR_CONFIG=/etc/texabr/config.json
+ExecStart=/usr/bin/node /opt/texabr/server/dist/index.js --backup-now
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=texabr-backup
+
+# Filesystem isolation.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+# ProtectKernelTunables / ProtectKernelLogs / ProtectHostname omitted to keep
+# the backup unit's hardening profile in lockstep with texabr.service. They
+# would technically be safe here (no bwrap), but symmetry makes the unit pair
+# easier to reason about.
+ReadWritePaths=/var/lib/texabr /var/log/texabr
+
+# Privilege.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+
+# No namespaces needed — restic and the SQLite snapshot don't unshare anything.
+RestrictNamespaces=true
+
+# AF_INET/AF_INET6 for restic talking to remote repos (sftp/rest/s3); AF_UNIX
+# for Node internals. AF_NETLINK is NOT needed here because we don't run bwrap.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictRealtime=true
+SystemCallArchitectures=native

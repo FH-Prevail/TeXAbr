@@ -1,0 +1,256 @@
+import { Router } from "express";
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import type { Config } from "../config";
+import type { Db } from "../db/db";
+import { requireAuth } from "../middleware/auth";
+import { requireProjectAccess } from "../services/access";
+import {
+  commitProject,
+  createProposalWorktree,
+  deleteBranch,
+  diffProposal,
+  diffProposalPatch,
+  ensureGitRepo,
+  listHistory,
+  mergeProposal,
+  removeProposalWorktree,
+} from "../services/git";
+import { ensureProjectDir, projectDir, resolveSafe, slugify, STARTER_TEX, FsBoundaryError } from "../services/projects";
+
+export function projectsRouter(cfg: Config, db: Db) {
+  const r = Router();
+  r.use(requireAuth(cfg, db));
+
+  r.get("/", (req, res) => {
+    const u = req.user!;
+    res.json({ projects: db.projects.listForUser(u.id) });
+  });
+
+  r.post("/", async (req, res) => {
+    const u = req.user!;
+    const { name, engine } = req.body ?? {};
+    if (typeof name !== "string" || !name.trim()) {
+      return res.status(400).json({ error: "name required" });
+    }
+    const e = typeof engine === "string" && cfg.latex.engines.includes(engine)
+      ? engine
+      : cfg.latex.defaultEngine;
+
+    let slug = slugify(name);
+    let i = 1;
+    while (db.projects.findByOwnerSlug(u.id, slug)) {
+      slug = `${slugify(name)}-${++i}`;
+    }
+
+    const project = db.projects.create({ ownerId: u.id, slug, name: name.trim(), engine: e });
+    const dir = await ensureProjectDir(cfg, u.id, project.id);
+    await fs.writeFile(path.join(dir, "main.tex"), STARTER_TEX, "utf8");
+    await ensureGitRepo(dir);
+    await commitProject(dir, "Create project", u);
+
+    res.json({ project: db.projects.accessForUser(project.id, u.id) ?? project });
+  });
+
+  r.get("/:id", (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    res.json({ project: p });
+  });
+
+  r.patch("/:id", (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "editor", res);
+    if (!p) return;
+
+    const { name, mainFile, engine } = req.body ?? {};
+    if (typeof name === "string" && name.trim()) {
+      if (p.access_role !== "owner") return res.status(403).json({ error: "owner access required" });
+      db.projects.rename(p.id, name.trim());
+    }
+    if (typeof mainFile === "string" && mainFile.trim()) {
+      try {
+        resolveSafe(projectDir(cfg, p.owner_id, p.id), mainFile.trim());
+      } catch (err) {
+        if (err instanceof FsBoundaryError) {
+          return res.status(400).json({ error: err.message });
+        }
+        throw err;
+      }
+      db.projects.setMainFile(p.id, mainFile.trim());
+    }
+    if (typeof engine === "string" && cfg.latex.engines.includes(engine)) {
+      db.projects.setEngine(p.id, engine);
+    }
+    res.json({ project: db.projects.accessForUser(p.id, u.id) ?? db.projects.findById(p.id) });
+  });
+
+  r.delete("/:id", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "owner", res);
+    if (!p) return;
+    db.projects.delete(p.id);
+    await fs.rm(projectDir(cfg, p.owner_id, p.id), { recursive: true, force: true });
+    res.json({ ok: true });
+  });
+
+  r.get("/:id/shares", (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "owner", res);
+    if (!p) return;
+    res.json({ members: db.projects.listMembers(p.id) });
+  });
+
+  r.post("/:id/shares", (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "owner", res);
+    if (!p) return;
+
+    const { username, role } = req.body ?? {};
+    if (typeof username !== "string" || !username.trim()) {
+      return res.status(400).json({ error: "username required" });
+    }
+    if (role !== "reader" && role !== "editor") {
+      return res.status(400).json({ error: "role must be reader or editor" });
+    }
+
+    const target = db.users.findByUsername(username.trim());
+    if (!target || target.disabled) return res.status(404).json({ error: "user not found" });
+    if (target.id === p.owner_id) return res.status(400).json({ error: "owner already has full access" });
+
+    db.projects.grantAccess(p.id, target.id, role);
+    res.json({ members: db.projects.listMembers(p.id) });
+  });
+
+  r.delete("/:id/shares/:userId", (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "owner", res);
+    if (!p) return;
+    const targetId = Number(req.params.userId);
+    if (!Number.isInteger(targetId) || targetId <= 0) {
+      return res.status(400).json({ error: "invalid user id" });
+    }
+    db.projects.revokeAccess(p.id, targetId);
+    res.json({ members: db.projects.listMembers(p.id) });
+  });
+
+  r.get("/:id/history", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    const root = await ensureProjectDir(cfg, p.owner_id, p.id);
+    res.json({ history: await listHistory(root) });
+  });
+
+  r.get("/:id/proposals", (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    res.json({ proposals: db.projects.listProposals(p.id) });
+  });
+
+  r.post("/:id/proposals", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "editor", res);
+    if (!p) return;
+
+    const { title, description } = req.body ?? {};
+    if (typeof title !== "string" || !title.trim()) {
+      return res.status(400).json({ error: "title required" });
+    }
+
+    const token = crypto.randomBytes(6).toString("hex");
+    const branchName = `proposal/${p.id}/${u.id}/${slugify(title)}-${token}`;
+    const worktreePath = path.join(cfg.dataDir, "worktrees", String(p.id), `${u.id}-${token}`);
+    const projectRoot = await ensureProjectDir(cfg, p.owner_id, p.id);
+
+    try {
+      await createProposalWorktree(projectRoot, worktreePath, branchName);
+      const proposal = db.projects.createProposal({
+        projectId: p.id,
+        createdBy: u.id,
+        title: title.trim(),
+        description: typeof description === "string" && description.trim() ? description.trim() : null,
+        branchName,
+        worktreePath,
+      });
+      res.json({ proposal });
+    } catch (err) {
+      await removeProposalWorktree(projectRoot, worktreePath).catch(() => {});
+      await deleteBranch(projectRoot, branchName).catch(() => {});
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  r.get("/:id/proposals/:proposalId/diff", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    const proposal = db.projects.findProposal(p.id, Number(req.params.proposalId));
+    if (!proposal) return res.status(404).json({ error: "proposal not found" });
+    if (proposal.status !== "open" && proposal.status !== "conflicted") {
+      return res.status(410).json({ error: `proposal is ${proposal.status}` });
+    }
+    const projectRoot = await ensureProjectDir(cfg, p.owner_id, p.id);
+    res.json({ files: await diffProposal(projectRoot, proposal.branch_name) });
+  });
+
+  r.get("/:id/proposals/:proposalId/patch", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    const proposal = db.projects.findProposal(p.id, Number(req.params.proposalId));
+    if (!proposal) return res.status(404).json({ error: "proposal not found" });
+    if (proposal.status !== "open" && proposal.status !== "conflicted") {
+      return res.status(410).json({ error: `proposal is ${proposal.status}` });
+    }
+    const projectRoot = await ensureProjectDir(cfg, p.owner_id, p.id);
+    res.type("text/plain").send(await diffProposalPatch(projectRoot, proposal.branch_name));
+  });
+
+  r.post("/:id/proposals/:proposalId/merge", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "owner", res);
+    if (!p) return;
+    const proposal = db.projects.findProposal(p.id, Number(req.params.proposalId));
+    if (!proposal) return res.status(404).json({ error: "proposal not found" });
+    if (proposal.status !== "open") return res.status(409).json({ error: `proposal is ${proposal.status}` });
+
+    const projectRoot = await ensureProjectDir(cfg, p.owner_id, p.id);
+    const result = await mergeProposal(projectRoot, proposal.branch_name, u, proposal.title);
+    if (!result.ok) {
+      db.projects.setProposalStatus(p.id, proposal.id, "conflicted");
+      return res.status(409).json({ error: "merge conflict", details: result.conflict });
+    }
+
+    db.projects.setProposalStatus(p.id, proposal.id, "merged");
+    db.projects.touch(p.id);
+    await removeProposalWorktree(projectRoot, proposal.worktree_path).catch(() => {});
+    await deleteBranch(projectRoot, proposal.branch_name).catch(() => {});
+    res.json({ proposal: db.projects.findProposal(p.id, proposal.id) });
+  });
+
+  r.post("/:id/proposals/:proposalId/close", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    const proposal = db.projects.findProposal(p.id, Number(req.params.proposalId));
+    if (!proposal) return res.status(404).json({ error: "proposal not found" });
+    if (proposal.created_by !== u.id && p.access_role !== "owner") {
+      return res.status(403).json({ error: "creator or owner access required" });
+    }
+    if (proposal.status !== "open" && proposal.status !== "conflicted") {
+      return res.status(409).json({ error: `proposal is ${proposal.status}` });
+    }
+
+    const projectRoot = await ensureProjectDir(cfg, p.owner_id, p.id);
+    db.projects.setProposalStatus(p.id, proposal.id, "closed");
+    await removeProposalWorktree(projectRoot, proposal.worktree_path).catch(() => {});
+    await deleteBranch(projectRoot, proposal.branch_name).catch(() => {});
+    res.json({ proposal: db.projects.findProposal(p.id, proposal.id) });
+  });
+
+  return r;
+}

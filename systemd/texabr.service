@@ -1,0 +1,144 @@
+[Unit]
+Description=TeXAbr - self-hosted multi-user LaTeX editor
+Documentation=https://github.com/FH-Prevail/TeXAbr
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# ─────────────────────────────────────────────────────────────────────────────
+# Hardening philosophy
+# ─────────────────────────────────────────────────────────────────────────────
+# This service spawns `prlimit -- bwrap -- pdflatex` per compile (see
+# services/sandbox.ts). Per-job isolation lives there: a fresh user / mount /
+# pid / net / ipc / uts / cgroup namespace, posix rlimits, no network, project
+# root the only writable path. The directives below harden the long-running
+# Node host; they must NOT block the syscalls or namespace setup that bwrap
+# needs, otherwise every compile fails.
+#
+# Each hardening line carries a short note. Anything previously tried and
+# rejected is captured here as a comment, not silently deleted, so a future
+# tightening pass doesn't reintroduce the same trap.
+
+Type=simple
+User=texabr
+Group=texabr
+WorkingDirectory=/opt/texabr/server
+Environment=NODE_ENV=production
+Environment=TEXABR_CONFIG=/etc/texabr/config.json
+ExecStart=/usr/bin/node /opt/texabr/server/dist/index.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+
+# Graceful shutdown: SIGTERM -> drain in-flight compiles -> exit.
+# TimeoutStopSec is the upper bound after which systemd SIGKILLs.
+KillSignal=SIGTERM
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=texabr
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Filesystem isolation
+# ─────────────────────────────────────────────────────────────────────────────
+# Read-only host fs except the explicit ReadWritePaths.
+ProtectSystem=strict
+# /home, /root, /run/user invisible.
+ProtectHome=true
+# Private /tmp; bwrap layers its own --tmpfs /tmp on top inside the sandbox.
+PrivateTmp=true
+# Minimal /dev for the host service; bwrap mounts a fresh /dev for the compile.
+PrivateDevices=true
+ProtectKernelModules=true
+# /sys/fs/cgroup read-only. bwrap unshares a cgroup namespace but does not
+# write to the host hierarchy, so this is compatible.
+ProtectControlGroups=true
+ProtectClock=true
+
+# ── Removed on purpose ──
+# Anything that bind-remounts a path under /proc fights the bubblewrap compile
+# sandbox. The kernel's mount_too_revealing() check rejects bwrap's plain
+# `mount -t proc` inside its new user/mount/pid namespace because the new
+# mount would be "more revealing" (rw) than an existing procfs bind in the
+# parent namespace (ro). The user-visible symptom is always the same:
+#   "bwrap: Can't mount proc on /newroot/proc: Operation not permitted".
+# Confirmed against Fedora 43 / kernel 6.19 / bubblewrap 0.11. Removed:
+#   * ProtectProc=invisible       — locks procfs hidepid across user ns.
+#   * ProcSubset=pid              — hides /proc/sys/kernel/overflow{u,g}id
+#                                   which bwrap reads to populate ID maps.
+#   * ProtectKernelTunables=true  — bind-remounts /proc/sys, /proc/sysrq-trigger,
+#                                   /proc/latency_stats, /proc/acpi, /proc/fs,
+#                                   /proc/irq, /proc/asound, /proc/bus ro.
+#   * ProtectKernelLogs=true      — bind-remounts /proc/kmsg ro.
+#   * ProtectHostname=true        — bind-remounts /proc/sys/kernel/hostname
+#                                   and /proc/sys/kernel/domainname ro.
+# These four would normally be cheap defense-in-depth, but the texabr service
+# has no capabilities and runs as an unprivileged user, so the protections
+# they buy are mostly theoretical here. The compile sandbox itself is what
+# isolates per-job execution.
+
+# Writable paths beyond PrivateTmp.
+ReadWritePaths=/var/lib/texabr /var/log/texabr
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Capabilities / privilege
+# ─────────────────────────────────────────────────────────────────────────────
+# Drop all capabilities. bwrap creates its sandbox via unprivileged user
+# namespaces, not capabilities, so dropping them is safe.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Namespaces and address families
+# ─────────────────────────────────────────────────────────────────────────────
+# Whitelist of namespaces bwrap's `--unshare-all` needs:
+#   user — unprivileged userns where bwrap drops privileges and re-gains
+#          fake-root inside the sandbox.
+#   mnt  — own mount tree for binds + tmpfs/proc/dev.
+#   pid  — fresh /proc inside the sandbox.
+#   net  — no host networking inside the compile.
+#   ipc  — isolation of System V IPC.
+#   uts  — own hostname/domain (we don't change either).
+#   cgroup — bwrap unshares cgroupns; no host-cgroup writes.
+RestrictNamespaces=user mnt pid net ipc uts cgroup
+
+# Address families used by:
+#   AF_INET / AF_INET6 — Express HTTP listener.
+#   AF_UNIX            — better-sqlite3, Node internal channels.
+#   AF_NETLINK         — bwrap brings up the loopback interface inside the
+#                        per-compile network namespace via NETLINK_ROUTE.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+# Service runs in the host user namespace; bwrap creates its own per compile.
+# Setting PrivateUsers=true here would nest a userns under another userns,
+# which works in principle but pins the compile sandbox's UID range to a
+# narrow shifted view that bwrap+TeX Live then has to reason about. Skip.
+PrivateUsers=false
+
+LockPersonality=true
+# Node V8 JIT writes executable pages, so this MUST stay false.
+MemoryDenyWriteExecute=false
+RestrictRealtime=true
+RemoveIPC=true
+SystemCallArchitectures=native
+
+# ── Removed on purpose ──
+# SystemCallFilter=@system-service / SystemCallFilter=~@privileged @resources
+# blocked capset(2), pivot_root(2) and friends that bwrap legitimately needs
+# while setting up the per-compile sandbox. The default action for a filtered
+# syscall is SIGSYS (core dump), not EPERM, so the symptom is bwrap segfaulting
+# inside drop_all_caps() and the compile timing out with no stderr. The other
+# directives in this unit (caps dropped, RestrictNamespaces whitelist,
+# ProtectKernel*, RestrictAddressFamilies, PrivateDevices) cover what a syscall
+# filter would normally fence off.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resource limits (host-side; per-compile rlimits are applied by `prlimit`)
+# ─────────────────────────────────────────────────────────────────────────────
+LimitNOFILE=4096
+LimitNPROC=512
+
+[Install]
+WantedBy=multi-user.target

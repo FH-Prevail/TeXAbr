@@ -1,0 +1,163 @@
+/*
+ * Utility styles for the non-editor pages (login, register, setup, projects
+ * list, admin panel). Reuses the CSS variables defined in global.css (which
+ * came from Openotex) so the look matches the editor.
+ *
+ * The editor itself sets `body { overflow: hidden; }` via global.css;
+ * `.scroll-page` re-enables scrolling on routes that need it.
+ */
+
+.scroll-page {
+  position: fixed;
+  inset: 0;
+  overflow: auto;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+}
+
+a { color: var(--color-accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+button {
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-strong);
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+}
+button:hover:not(:disabled) { background: var(--color-hover-bg); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-paper);
+}
+button.primary:hover:not(:disabled)  { background: var(--color-accent-hover); border-color: var(--color-accent-hover); }
+button.danger {
+  background: var(--color-danger-bg);
+  border-color: var(--color-danger-border);
+  color: var(--color-danger-text);
+}
+button.danger:hover:not(:disabled)   { color: var(--color-danger-text-hover); }
+
+input, select, textarea {
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-strong);
+  padding: 6px 10px;
+  border-radius: 4px;
+  font: inherit;
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.center-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+.card {
+  background: var(--color-panel);
+  border: 1px solid var(--color-border-muted);
+  border-radius: 8px;
+  padding: 24px;
+  width: 100%;
+  max-width: 420px;
+  box-shadow: 0 4px 20px var(--color-shadow);
+}
+.card h1 { margin: 0 0 4px; font-size: 22px; color: var(--color-heading); }
+.card h2 { margin: 0 0 12px; font-size: 16px; color: var(--color-text-muted); font-weight: normal; }
+.card form { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+.card .row { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; font-size: 13px; }
+
+.error { color: var(--color-danger-text); margin-top: 8px; min-height: 1em; }
+.muted { color: var(--color-text-muted); }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border-muted);
+}
+.topbar .grow { flex: 1; }
+.topbar .brand {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--color-heading);
+}
+
+.layout {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+}
+
+table.simple { border-collapse: collapse; width: 100%; }
+table.simple th, table.simple td {
+  text-align: left; padding: 6px 10px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+table.simple th { color: var(--color-text-muted); font-weight: 600; }
+
+.project-actions,
+.project-share form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.project-details {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--color-border-muted);
+  border-radius: 8px;
+  background: var(--color-panel);
+}
+
+.project-details h3,
+.project-details h4 {
+  margin: 0 0 8px;
+}
+
+.project-share,
+.project-history {
+  margin-top: 16px;
+}
+
+table.compact {
+  margin-top: 8px;
+}
+
+table.compact th,
+table.compact td {
+  padding: 5px 8px;
+}
+
+.mono {
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+}
+
+.proposal-summary {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 6px;
+  background: var(--color-bg-secondary);
+}
+
+.proposal-file {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+}

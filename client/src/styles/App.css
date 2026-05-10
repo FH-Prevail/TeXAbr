@@ -1,0 +1,197 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+}
+
+.workspace {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+.proposal-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 6px 12px;
+  background-color: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-border-strong);
+  font-size: 12px;
+}
+
+.proposal-bar button,
+.proposal-select {
+  height: 26px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 4px;
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  padding: 0 8px;
+  font: inherit;
+}
+
+.proposal-bar button {
+  cursor: pointer;
+}
+
+.proposal-bar button:hover:not(:disabled),
+.proposal-select:hover {
+  border-color: var(--color-accent);
+}
+
+.proposal-bar button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.proposal-bar button.primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-bg-primary);
+}
+
+.proposal-link {
+  font-weight: 600;
+}
+
+.proposal-label,
+.proposal-badge {
+  color: var(--color-text-muted);
+}
+
+.proposal-badge {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border-muted);
+  border-radius: 999px;
+}
+
+.proposal-open {
+  color: var(--color-accent);
+}
+
+.proposal-conflicted {
+  color: var(--color-danger-text);
+}
+
+.proposal-diff {
+  max-height: 220px;
+  overflow: auto;
+  padding: 12px;
+  border-bottom: 1px solid var(--color-border-strong);
+  background: var(--color-bg-primary);
+  color: var(--color-text-secondary);
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
+.main-container {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.editor-stack {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+.editor-stack .editor-container {
+  flex: 1;
+}
+
+/* Split container styles */
+.split-container {
+  display: flex;
+  flex: 1;
+  height: 100%;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  height: 100%;
+}
+
+.file-explorer-panel {
+  background-color: var(--color-panel);
+  border-right: 1px solid var(--color-border-strong);
+}
+
+.panel-toggle {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--color-border-strong);
+}
+
+.panel-toggle button {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-strong);
+  background: none;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s, color 0.2s;
+}
+
+.panel-toggle button.active {
+  border-color: var(--color-accent);
+  background-color: var(--color-accent-muted, #2f80ed1a);
+  color: var(--color-text-primary);
+}
+
+.panel-toggle button:hover:not(.active) {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.panel-body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+.panel-body > * {
+  flex: 1;
+}
+
+.editor-panel {
+  background-color: var(--color-bg-primary);
+  border-right: 1px solid var(--color-border-strong);
+}
+
+.preview-panel {
+  background-color: var(--color-panel);
+}
+
+/* Gutter styles (the draggable divider) */
+.gutter {
+  background-color: var(--color-border-strong);
+  background-repeat: no-repeat;
+  background-position: 50%;
+  transition: background-color 0.2s;
+}
+
+.gutter:hover {
+  background-color: var(--color-accent);
+}
+
+.gutter.gutter-horizontal {
+  cursor: col-resize;
+  background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAAeCAYAAADkftS9AAAAIklEQVQoU2M4c+bMfxAGAgYYmwGrIIiDjrELjpo5aiZeMwF+yNnOs5KSvgAAAABJRU5ErkJggg==');
+}
+
+.gutter.gutter-horizontal:hover {
+  background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAAeCAYAAADkftS9AAAAIklEQVQoU2NkYGD4zyAOYGCAAcZRTUydOWrmqJmjZg6OmQDw8BnOs5KSvgAAAABJRU5ErkJggg==');
+}
+
