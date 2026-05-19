@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type GitCommit, type GitDiffFile, type Project, type ProjectMember, type ProjectProposal } from "../api/client";
 import { useAuth } from "../api/auth-context";
+import { useDocumentTitle } from "../shared/useDocumentTitle";
 
 export function ProjectsPage() {
+  useDocumentTitle("Projects - TeXAbr");
   const { user, logout } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
   const [name, setName] = useState("");

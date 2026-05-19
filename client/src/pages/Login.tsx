@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../api/auth-context";
 import { api, type MetaResponse } from "../api/client";
+import { useDocumentTitle } from "../shared/useDocumentTitle";
 
 export function LoginPage() {
+  useDocumentTitle("Sign in - TeXAbr");
   const { user, login } = useAuth();
   const nav = useNavigate();
   const [meta, setMeta] = useState<MetaResponse | null>(null);

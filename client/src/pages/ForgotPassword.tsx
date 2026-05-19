@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { RecoverySeedDialog } from "../components/RecoverySeedDialog";
+import { useDocumentTitle } from "../shared/useDocumentTitle";
 
 // Recover access using the one-time recovery code shown at registration.
 // On success the server resets the password, bumps token_version (revoking
@@ -9,6 +10,7 @@ import { RecoverySeedDialog } from "../components/RecoverySeedDialog";
 // that we present in the same one-shot modal as registration uses.
 
 export function ForgotPasswordPage() {
+  useDocumentTitle("Reset password - TeXAbr");
   const nav = useNavigate();
   const [username, setUsername] = useState("");
   const [seed, setSeed] = useState("");

@@ -3,8 +3,10 @@ import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../api/auth-context";
 import { api, type MetaResponse } from "../api/client";
 import { RecoverySeedDialog } from "../components/RecoverySeedDialog";
+import { useDocumentTitle } from "../shared/useDocumentTitle";
 
 export function RegisterPage() {
+  useDocumentTitle("Create account - TeXAbr");
   const { user, refresh } = useAuth();
   const nav = useNavigate();
   const [params] = useSearchParams();

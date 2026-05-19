@@ -11,8 +11,10 @@ import {
   type SettingDescriptor,
 } from "../api/client";
 import { useAuth } from "../api/auth-context";
+import { useDocumentTitle } from "../shared/useDocumentTitle";
 
 export function AdminPage() {
+  useDocumentTitle("Admin - TeXAbr");
   const { user, logout } = useAuth();
   return (
     <div className="scroll-page layout">

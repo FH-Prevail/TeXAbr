@@ -3,10 +3,12 @@ import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../api/auth-context";
 import { api, type MetaResponse } from "../api/client";
 import { RecoverySeedDialog } from "../components/RecoverySeedDialog";
+import { useDocumentTitle } from "../shared/useDocumentTitle";
 
 // First-run wizard. Consumes the bootstrap token printed by install.sh
 // and creates the initial admin account.
 export function SetupPage() {
+  useDocumentTitle("First-run setup - TeXAbr");
   const { user, refresh } = useAuth();
   const nav = useNavigate();
   const [meta, setMeta] = useState<MetaResponse | null>(null);

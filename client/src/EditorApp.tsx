@@ -165,6 +165,13 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
     });
     const [statusMessage, setStatusMessage] = useState<string>('');
     const [projectInfo, setProjectInfo] = useState<Project | null>(null);
+    // Reflect the project name in the browser tab. Until the project loads we
+    // show a placeholder so the tab isn't blank.
+    useEffect(() => {
+        const prev = document.title;
+        document.title = projectInfo ? `${projectInfo.name} - TeXAbr` : "Editor - TeXAbr";
+        return () => { document.title = prev; };
+    }, [projectInfo]);
     const [proposals, setProposals] = useState<ProjectProposal[]>([]);
     const [activeProposalId, setActiveProposalId] = useState<number | null>(null);
     const [proposalPatch, setProposalPatch] = useState<string>('');
