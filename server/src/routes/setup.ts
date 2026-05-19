@@ -3,6 +3,7 @@ import bcrypt from "bcrypt";
 import type { Config } from "../config";
 import type { Db } from "../db/db";
 import { issueSession } from "./auth";
+import { generateRecoverySeed, hashRecoverySeed } from "../services/recoverySeed";
 
 // One-shot endpoint to claim the bootstrap admin account using the token
 // printed by install.sh. Disables itself once any admin exists.
@@ -27,17 +28,22 @@ export function setupRouter(cfg: Config, db: Db) {
       return res.status(400).json({ error: `username 3-32 chars, password >= ${minLen} chars` });
     }
 
-    const hash = await bcrypt.hash(password, db.registry.getInt("auth.bcryptCost"));
+    const cost = db.registry.getInt("auth.bcryptCost");
+    const hash = await bcrypt.hash(password, cost);
+    const recoverySeed = generateRecoverySeed();
+    const recoverySeedHash = await hashRecoverySeed(recoverySeed, cost);
+
     const user = db.users.create({
       username,
       email: typeof email === "string" ? email : null,
       passwordHash: hash,
       role: "admin",
+      recoverySeedHash,
     });
 
     issueSession(cfg, db, res, user.id);
     db.audit.record({ event: "auth.bootstrap.success", actor: { id: user.id, name: user.username } });
-    res.json({ user: publicUser(user) });
+    res.json({ user: publicUser(user), recoverySeed });
   });
 
   return r;

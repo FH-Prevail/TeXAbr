@@ -7,6 +7,12 @@ import { requireAuth, signToken } from "../middleware/auth";
 import { getRegistrationMode } from "../services/registration";
 import { makeLockout, type LockoutService } from "../services/lockout";
 import { setCsrfCookie, clearCsrfCookie } from "../middleware/csrf";
+import {
+  generateRecoverySeed,
+  hashRecoverySeed,
+  isValidRecoverySeedFormat,
+  verifyRecoverySeed,
+} from "../services/recoverySeed";
 
 let lockoutSvc: LockoutService | null = null;
 function getLockout(db: Db): LockoutService {
@@ -88,7 +94,12 @@ export function authRouter(cfg: Config, db: Db) {
       return res.status(403).json({ error: "invite token required" });
     }
 
-    const hash = await bcrypt.hash(password, db.registry.getInt("auth.bcryptCost"));
+    const cost = db.registry.getInt("auth.bcryptCost");
+    const hash = await bcrypt.hash(password, cost);
+    // Generate the recovery seed BEFORE the transaction so we can return its
+    // plaintext to the user once. The DB only ever stores the bcrypt hash.
+    const recoverySeed = generateRecoverySeed();
+    const recoverySeedHash = await hashRecoverySeed(recoverySeed, cost);
     let user;
     try {
       user = db.raw.transaction(() => {
@@ -101,6 +112,7 @@ export function authRouter(cfg: Config, db: Db) {
           email: typeof email === "string" ? email : null,
           passwordHash: hash,
           role: "user",
+          recoverySeedHash,
         });
       })();
     } catch (err) {
@@ -115,7 +127,94 @@ export function authRouter(cfg: Config, db: Db) {
 
     issueSession(cfg, db, res, user.id);
     db.audit.record({ event: "auth.register", actor: { id: user.id, name: user.username }, ip, detail: { mode } });
-    res.json({ user: publicUser(user) });
+    // recoverySeed is included exactly once, in this response. Never stored
+    // plaintext anywhere on the server; the client UI is responsible for
+    // showing it to the user with a "save this somewhere safe" warning.
+    res.json({ user: publicUser(user), recoverySeed });
+  });
+
+  // ---- Password recovery via seed --------------------------------------------
+  // Body: { username, recoverySeed, newPassword }. Same lockout counters as
+  // /login, so brute-forcing the seed is throttled identically.
+  r.post("/recover", async (req, res) => {
+    const lockout = getLockout(db);
+    const ip = clientIp(req);
+    const { username, recoverySeed, newPassword } = req.body ?? {};
+
+    if (typeof username !== "string" || typeof newPassword !== "string" || typeof recoverySeed !== "string") {
+      return res.status(400).json({ error: "username, recoverySeed, and newPassword are required" });
+    }
+    if (!isValidRecoverySeedFormat(recoverySeed)) {
+      return res.status(400).json({ error: "recoverySeed must be 32 hex characters (groups of 4, hyphen-separated)" });
+    }
+    const minLen = db.registry.getInt("registration.passwordMinLength");
+    if (newPassword.length < minLen) {
+      return res.status(400).json({ error: `password must be >= ${minLen} characters` });
+    }
+
+    const lk = lockout.check({ username, ip });
+    if (lk.locked) {
+      lockout.recordAttempt({ username, ip, outcome: "locked" });
+      db.audit.record({
+        event: "auth.recover.fail", actor: { name: username }, ip,
+        outcome: "denied", detail: { reason: "locked" },
+      });
+      return res.status(429).json({ error: "too many failed attempts; try again later" });
+    }
+
+    const user = db.users.findByUsername(username);
+    if (!user || user.disabled) {
+      // Same bucket as bad_password — these all signal that some credential
+      // is wrong, and we don't want to leak which one.
+      lockout.recordAttempt({ username, ip, outcome: "bad_password" });
+      db.audit.record({
+        event: "auth.recover.fail", actor: { name: username }, ip,
+        outcome: "denied", detail: { reason: user ? "disabled" : "no_user" },
+      });
+      return res.status(401).json({ error: "invalid credentials" });
+    }
+
+    const ok = await verifyRecoverySeed(recoverySeed, user.recovery_seed_hash);
+    if (!ok) {
+      lockout.recordAttempt({ username, ip, outcome: "bad_password" });
+      db.audit.record({
+        event: "auth.recover.fail", actor: { id: user.id, name: user.username }, ip,
+        outcome: "denied", detail: { reason: "bad_seed" },
+      });
+      return res.status(401).json({ error: "invalid credentials" });
+    }
+
+    const cost = db.registry.getInt("auth.bcryptCost");
+    const newHash = await bcrypt.hash(newPassword, cost);
+    // Rotate the seed at the same time so a leaked seed can't be replayed.
+    const nextSeed = generateRecoverySeed();
+    const nextSeedHash = await hashRecoverySeed(nextSeed, cost);
+
+    db.raw.transaction(() => {
+      db.users.setPassword(user.id, newHash);
+      db.users.setRecoverySeedHash(user.id, nextSeedHash);
+      db.users.bumpTokenVersion(user.id);
+    })();
+
+    lockout.recordAttempt({ username, ip, outcome: "success" });
+    db.audit.record({
+      event: "auth.recover.success", actor: { id: user.id, name: user.username }, ip,
+    });
+    res.json({ ok: true, recoverySeed: nextSeed });
+  });
+
+  // ---- Rotate the recovery seed for a logged-in user -------------------------
+  // Returns a fresh seed; old seed is invalidated atomically.
+  r.post("/rotate-seed", requireAuth(cfg, db), async (req, res) => {
+    const me = req.user!;
+    const cost = db.registry.getInt("auth.bcryptCost");
+    const nextSeed = generateRecoverySeed();
+    const nextSeedHash = await hashRecoverySeed(nextSeed, cost);
+    db.users.setRecoverySeedHash(me.id, nextSeedHash);
+    db.audit.record({
+      event: "auth.recover.rotate", actor: { id: me.id, name: me.username }, ip: clientIp(req),
+    });
+    res.json({ ok: true, recoverySeed: nextSeed });
   });
 
   r.post("/logout", (req, res) => {

@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from "./api/auth-context";
 import { LoginPage } from "./pages/Login";
 import { RegisterPage } from "./pages/Register";
 import { SetupPage } from "./pages/Setup";
+import { ForgotPasswordPage } from "./pages/ForgotPassword";
 import { ProjectsPage } from "./pages/Projects";
 import { EditorPage } from "./pages/Editor";
 import { AdminPage } from "./pages/Admin";
@@ -14,6 +15,7 @@ export function App() {
         <Route path="/setup"     element={<SetupPage />} />
         <Route path="/login"     element={<LoginPage />} />
         <Route path="/register"  element={<RegisterPage />} />
+        <Route path="/forgot"    element={<ForgotPasswordPage />} />
 
         <Route path="/"          element={<Authed><ProjectsPage /></Authed>} />
         <Route path="/p/:id"     element={<Authed><EditorPage /></Authed>} />

@@ -72,6 +72,13 @@ const MIGRATIONS: Migration[] = [
       addColumnIfMissing(db, "users", "token_version", "INTEGER NOT NULL DEFAULT 1");
     },
   },
+  {
+    version: 4,
+    name: "users_recovery_seed",
+    up: (db) => {
+      addColumnIfMissing(db, "users", "recovery_seed_hash", "TEXT");
+    },
+  },
 ];
 
 export function migrate(raw: Database.Database, cfg: Config) {

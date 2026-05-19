@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../api/auth-context";
 import { api, type MetaResponse } from "../api/client";
+import { RecoverySeedDialog } from "../components/RecoverySeedDialog";
 
 // First-run wizard. Consumes the bootstrap token printed by install.sh
 // and creates the initial admin account.
@@ -15,20 +16,22 @@ export function SetupPage() {
   const [email, setEmail] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pendingSeed, setPendingSeed] = useState<string | null>(null);
 
   useEffect(() => { void api.meta().then(setMeta); }, []);
 
-  if (user) return <Navigate to="/" replace />;
-  if (meta && !meta.bootstrapNeeded) return <Navigate to="/login" replace />;
+  if (user && !pendingSeed) return <Navigate to="/" replace />;
+  if (meta && !meta.bootstrapNeeded && !pendingSeed) return <Navigate to="/login" replace />;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError("");
     try {
-      await api.setup({ token, username, password, email: email || undefined });
+      const r = await api.setup({ token, username, password, email: email || undefined });
       await refresh();
-      nav("/admin");
+      if (r.recoverySeed) setPendingSeed(r.recoverySeed);
+      else nav("/admin");
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -70,6 +73,14 @@ export function SetupPage() {
         </form>
         <p className="error">{error}</p>
       </div>
+
+      {pendingSeed && (
+        <RecoverySeedDialog
+          seed={pendingSeed}
+          context="registration"
+          onClose={() => { setPendingSeed(null); nav("/admin"); }}
+        />
+      )}
     </div>
   );
 }

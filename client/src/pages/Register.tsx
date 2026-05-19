@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { useAuth } from "../api/auth-context";
 import { api, type MetaResponse } from "../api/client";
+import { RecoverySeedDialog } from "../components/RecoverySeedDialog";
 
 export function RegisterPage() {
-  const { user, register } = useAuth();
+  const { user, refresh } = useAuth();
   const nav = useNavigate();
   const [params] = useSearchParams();
   const [meta, setMeta] = useState<MetaResponse | null>(null);
@@ -14,9 +15,11 @@ export function RegisterPage() {
   const [invite, setInvite] = useState(params.get("invite") ?? "");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  // Hold the one-time recovery seed in state until the user acknowledges it.
+  const [pendingSeed, setPendingSeed] = useState<string | null>(null);
 
   useEffect(() => { void api.meta().then(setMeta); }, []);
-  if (user) return <Navigate to="/" replace />;
+  if (user && !pendingSeed) return <Navigate to="/" replace />;
 
   const inviteRequired = meta?.registration.mode === "invite";
   const registrationClosed = meta?.registration.mode === "closed";
@@ -31,8 +34,14 @@ export function RegisterPage() {
       return;
     }
     try {
-      await register({ username, password, email: email || undefined, invite: invite || undefined });
-      nav("/");
+      const r = await api.register({ username, password, email: email || undefined, invite: invite || undefined });
+      await refresh();
+      if (r.recoverySeed) {
+        // Block navigation until the user acknowledges the one-shot code.
+        setPendingSeed(r.recoverySeed);
+      } else {
+        nav("/");
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -82,6 +91,14 @@ export function RegisterPage() {
           <Link to="/login">Have an account? Sign in</Link>
         </div>
       </div>
+
+      {pendingSeed && (
+        <RecoverySeedDialog
+          seed={pendingSeed}
+          context="registration"
+          onClose={() => { setPendingSeed(null); nav("/"); }}
+        />
+      )}
     </div>
   );
 }

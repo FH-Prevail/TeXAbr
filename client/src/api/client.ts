@@ -52,6 +52,9 @@ export const api = {
   register:(b: RegisterBody) => call<AuthResponse>("POST", "/api/auth/register", b),
   logout:  () => call<{ ok: true }>("POST", "/api/auth/logout"),
   me:      () => call<{ user: User }>("GET", "/api/auth/me"),
+  recover: (b: { username: string; recoverySeed: string; newPassword: string }) =>
+    call<{ ok: true; recoverySeed: string }>("POST", "/api/auth/recover", b),
+  rotateSeed: () => call<{ ok: true; recoverySeed: string }>("POST", "/api/auth/rotate-seed"),
 
   projects: {
     list:   () => call<{ projects: Project[] }>("GET", "/api/projects"),
@@ -213,7 +216,7 @@ export interface MetaResponse {
   latex: { engines: string[]; defaultEngine: string };
   bootstrapNeeded: boolean;
 }
-export interface AuthResponse { user: User; }
+export interface AuthResponse { user: User; recoverySeed?: string; }
 export interface SetupBody    { token: string; username: string; password: string; email?: string; }
 export interface LoginBody    { username: string; password: string; }
 export interface RegisterBody { username: string; password: string; email?: string; invite?: string; }

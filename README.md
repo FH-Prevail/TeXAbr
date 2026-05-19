@@ -64,6 +64,12 @@ TeXAbr targets that gap. **Server-first**: install once, every user just needs a
 - `token_version` per user — bump it to revoke every issued JWT (used on disable, password change, admin "Revoke sessions").
 - Optional `auth.https.enforced`: HTTP→HTTPS 301 redirect plus HSTS.
 
+### Password recovery (no email required)
+- At registration (and bootstrap), the server generates a 128-bit recovery code formatted as `XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX` and shows it to the user **once**. The DB only stores its bcrypt hash.
+- If the user forgets their password, they enter username + recovery code + new password at `/forgot`. The server verifies the seed, resets the password, bumps `token_version` (signing out every other session), and issues a **fresh** recovery code (the old one is invalidated atomically).
+- Recovery attempts feed the same login-lockout counters, so brute-forcing the code is rate-limited identically to password guessing.
+- Logged-in users can rotate the recovery code via `POST /api/auth/rotate-seed`.
+
 ### Backups
 - Restic-based snapshots of `dataDir` plus an online SQLite checkpoint.
 - Driven by `texabr-backup.timer` (default `OnCalendar=*-*-* 03:00:00`).

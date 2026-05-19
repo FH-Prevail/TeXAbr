@@ -61,6 +61,7 @@ export function LoginPage() {
           {canRegister
             ? <Link to="/register">Create an account</Link>
             : <span className="muted">Registration is closed</span>}
+          <Link to="/forgot">Forgot password?</Link>
         </div>
       </div>
     </div>
