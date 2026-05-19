@@ -224,6 +224,20 @@ What TeXAbr is **not** doing (be explicit):
 - **No real-time collab.** Two simultaneous editors of the same file get a soft single-writer lock; the second sees a 409 with the holder's name. CRDT/OT collab is out of scope for 1.0.
 - **No automatic restore.** Backups are written by the timer; recovery is operator-driven.
 
+## Upgrading an already-installed host
+
+After the first `install.sh` run, prefer `scripts/deploy.sh` for subsequent upgrades:
+
+```bash
+cd /opt/texabr-src
+git pull
+sudo ./scripts/deploy.sh
+```
+
+The script rsyncs your source over `/opt/texabr/` without touching the existing `dist/` trees, then builds server + client into sibling `dist-new/` directories and atomically swaps them in. If the build crashes mid-way, the running service keeps serving the old bundle. After a successful restart and `/api/healthz` probe, it drops the previous `dist`; on a failed restart it rolls back. It does **not** touch apt packages, the systemd unit, firewall rules, sysctls, or `config.json` — those are install-time concerns.
+
+Re-run the full `install.sh -y` only when you actually need to change those install-time concerns (system packages added, systemd unit rewritten, kernel sysctls revised).
+
 ## Troubleshooting
 
 Quick keys to common failures the install + first-compile path can throw at you.
