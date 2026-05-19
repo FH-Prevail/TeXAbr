@@ -467,11 +467,19 @@ build_app() {
   # within the install run.
   local NPM_INSTALL_FLAGS="--no-audit --no-fund"
 
+  # Node's default V8 heap limit (~512MB) is not enough for the client bundle:
+  # Vite + Monaco + pdf.js + react together blow past it and crash with
+  # "JavaScript heap out of memory" on 1GB VPS plans. Allowing 2GB is safe
+  # even on small boxes because the build process is short-lived; once
+  # `vite build` exits, the memory is released and the running texabr.service
+  # only uses ~50MB.
+  local NODE_BUILD_OPTS="--max-old-space-size=2048"
+
   log "building server"
-  ( cd "$INSTALL_DIR/server" && NODE_ENV=development npm install $NPM_INSTALL_FLAGS && npm run build )
+  ( cd "$INSTALL_DIR/server" && NODE_ENV=development npm install $NPM_INSTALL_FLAGS && NODE_OPTIONS="$NODE_BUILD_OPTS" npm run build )
 
   log "building client"
-  ( cd "$INSTALL_DIR/client" && NODE_ENV=development npm install $NPM_INSTALL_FLAGS && npm run build )
+  ( cd "$INSTALL_DIR/client" && NODE_ENV=development npm install $NPM_INSTALL_FLAGS && NODE_OPTIONS="$NODE_BUILD_OPTS" npm run build )
 
   # Strip dev deps from the server install (keep client/dist; client deps are
   # build-time only and the static dist is what we serve).
