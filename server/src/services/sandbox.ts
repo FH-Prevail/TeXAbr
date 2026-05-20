@@ -21,6 +21,12 @@ export interface SandboxOptions {
   engine: string;
   args: string[];
   env: NodeJS.ProcessEnv;
+  // Optional absolute path INSIDE the sandbox to use as the working directory.
+  // Must reside under projectRoot (the only --bind-mounted writable path).
+  // Defaults to projectRoot itself. Used so compiles whose main file lives in
+  // a subdirectory (e.g. paper/paper.tex) can chdir into that subdirectory
+  // and have relative paths in \input / \includegraphics resolve naturally.
+  cwd?: string;
   // Wall-clock kill switch, applied by the caller via SIGKILL.
 }
 
@@ -76,6 +82,12 @@ export function buildSandboxedCommand(db: Db, opts: SandboxOptions): { cmd: stri
   ];
 
   const root = path.resolve(opts.projectRoot);
+  // Validate the requested chdir is inside the bound root, otherwise bwrap
+  // would refuse to chdir there and the compile would die with EPERM.
+  const chdirTarget = opts.cwd ? path.resolve(opts.cwd) : root;
+  if (chdirTarget !== root && !chdirTarget.startsWith(root + path.sep)) {
+    throw new Error(`sandbox cwd ${chdirTarget} escapes projectRoot ${root}`);
+  }
 
   // Order matters: bwrap applies mount args left-to-right. Put virtual
   // filesystems (tmpfs, proc, dev) BEFORE binds so a later --tmpfs can never
@@ -97,13 +109,13 @@ export function buildSandboxedCommand(db: Db, opts: SandboxOptions): { cmd: stri
     ...(existsSilently("/sbin")   ? ["--ro-bind", "/sbin", "/sbin"]     : []),
     ...(existsSilently("/var/lib/texmf") ? ["--ro-bind", "/var/lib/texmf", "/var/lib/texmf"] : []),
     "--bind", root, root,
-    "--chdir", root,
+    "--chdir", chdirTarget,
     // Pin PATH so the engine resolves even when the parent env was sanitised
     // (e.g. `sudo -u texabr` strips PATH; some service managers set a minimal
     // PATH). Without this, bwrap's execvp can fail to find pdflatex.
     "--setenv", "PATH", "/usr/bin:/usr/sbin:/bin:/sbin",
-    "--setenv", "HOME", root,
-    "--setenv", "TEXMFOUTPUT", root,
+    "--setenv", "HOME", chdirTarget,
+    "--setenv", "TEXMFOUTPUT", chdirTarget,
     "--setenv", "openout_any", "p",
     "--setenv", "openin_any",  "p",
     "--",
@@ -126,9 +138,13 @@ export function buildSandboxedCommand(db: Db, opts: SandboxOptions): { cmd: stri
 // group so we can kill the whole tree on timeout.
 export function spawnSandboxed(db: Db, opts: SandboxOptions, onSpawn?: (pid: number | undefined) => void): Promise<{ code: number | null; stderr: string; killed: boolean }> {
   const built = buildSandboxedCommand(db, opts);
+  // When sandboxed, bwrap's --chdir governs the engine's cwd; Node's cwd just
+  // affects bwrap itself. When NOT sandboxed (fallback path on hosts without
+  // bwrap), Node's cwd IS the engine's cwd, so it must match.
+  const nodeCwd = opts.cwd ? path.resolve(opts.cwd) : opts.projectRoot;
   return new Promise((resolve) => {
     const child = spawn(built.cmd, built.argv, {
-      cwd: opts.projectRoot,
+      cwd: nodeCwd,
       detached: true,
       env: opts.env,
       stdio: ["ignore", "pipe", "pipe"],

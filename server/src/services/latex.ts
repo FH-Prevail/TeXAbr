@@ -61,6 +61,15 @@ export async function compile(
       throw new Error("main file escapes project root");
     }
     const main = path.relative(projectRoot, mainAbs);
+    // chdir the engine into the directory that holds the main .tex so that
+    // `\input{...}` and `\includegraphics{figures/...}` resolve relative to
+    // that file (the conventional LaTeX workflow Overleaf/latexmk/TeXshop
+    // all use). Without this, a project laid out as paper/paper.tex with
+    // paper/figures/* fails with "file not found" because pdflatex resolves
+    // relative paths from CWD = projectRoot.
+    const mainDirAbs = path.dirname(mainAbs);
+    const mainDirRel = path.relative(projectRoot, mainDirAbs);  // "" or "paper" or "paper/sub"
+    const mainBasename = path.basename(mainAbs);
 
     const shellEscapeMode = db.registry.getEnum("latex.shellEscape");
     const args = [
@@ -69,15 +78,17 @@ export async function compile(
       "-file-line-error",
       shellEscapeMode === "off" ? "-no-shell-escape" : "-shell-restricted",
       "-synctex=1",
-      main,
+      mainBasename,
     ];
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       // Even with the sandbox these block \write18 pathways and stop TeX from
-      // sniffing $HOME for arbitrary aux files.
-      HOME: projectRoot,
-      TEXMFOUTPUT: projectRoot,
+      // sniffing $HOME for arbitrary aux files. Point both at the working
+      // directory (the main file's dir) so auxiliary files land next to the
+      // .tex rather than at the project root.
+      HOME: mainDirAbs,
+      TEXMFOUTPUT: mainDirAbs,
       openout_any: "p",
       openin_any:  "p",
     };
@@ -93,6 +104,7 @@ export async function compile(
         engine: opts.engine,
         args,
         env,
+        cwd: mainDirAbs,
       }, (pid) => {
         activePid = pid;
         trackProc(pid);
@@ -121,9 +133,12 @@ export async function compile(
       throw new Error(`project exceeds maxProjectMb (${db.registry.getInt("limits.maxProjectMb")} MB) after compile`);
     }
 
-    const baseNoExt = path.basename(main, path.extname(main));
-    const pdfRel = `${baseNoExt}.pdf`;
-    const logRel = `${baseNoExt}.log`;
+    // PDF and log land next to the .tex file (in the chdir'd directory).
+    // Return paths RELATIVE to projectRoot so the client can fetch them via
+    // /api/files/.../raw?path=… without any extra subdir reasoning.
+    const baseNoExt = path.basename(mainBasename, path.extname(mainBasename));
+    const pdfRel = mainDirRel ? `${mainDirRel}/${baseNoExt}.pdf` : `${baseNoExt}.pdf`;
+    const logRel = mainDirRel ? `${mainDirRel}/${baseNoExt}.log` : `${baseNoExt}.log`;
     const pdfAbs = path.join(projectRoot, pdfRel);
     const logAbs = path.join(projectRoot, logRel);
 
