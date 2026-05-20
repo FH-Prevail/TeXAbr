@@ -82,6 +82,14 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
   });
   const [dragDestination, setDragDestination] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  // "Show build files" checkbox state. Default false = build artifacts hidden.
+  // Persisted to localStorage so the user's preference survives reloads.
+  const [showBuildFiles, setShowBuildFiles] = useState<boolean>(() => {
+    try { return localStorage.getItem('texabr.showBuildFiles') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('texabr.showBuildFiles', showBuildFiles ? '1' : '0'); } catch { /* private mode */ }
+  }, [showBuildFiles]);
   const reloadTimeoutRef = useRef<number | null>(null);
   // Two hidden inputs so the toolbar buttons can trigger a file-picker (any
   // number of files) and a directory-picker (preserves the folder structure
@@ -695,6 +703,21 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
     onFileSelect(file);
   };
 
+  // Files we treat as build artifacts when "Show build files" is off. The
+  // list covers what pdflatex / xelatex / lualatex / latexmk / biber / makeindex
+  // / glossaries / hyperref typically emit. Source files (.tex, .cls, .sty, .bib)
+  // are NEVER filtered. Directories aren't filtered either, even an "out/"
+  // folder created by a Makefile stays visible — only individual files match.
+  const BUILD_FILE_RE = /\.(aux|log|out|toc|lof|lot|bbl|blg|bcf|run\.xml|synctex\.gz|synctex|fls|fdb_latexmk|nav|snm|vrb|idx|ind|ilg|glo|gls|glg|acn|acr|alg|xdy|xdv|brf|loa|ist|maf|mtc(\d+)?|ptc|los|stc|figlist|tablist)$/i;
+  const isBuildArtifact = (name: string): boolean => BUILD_FILE_RE.test(name);
+
+  const filterTree = (nodes: FileNode[]): FileNode[] => {
+    if (showBuildFiles) return nodes;
+    return nodes
+      .filter(n => n.isDirectory || !isBuildArtifact(n.name))
+      .map(n => n.isDirectory && n.children ? { ...n, children: filterTree(n.children) } : n);
+  };
+
   const renderFileTree = (nodes: FileNode[], depth: number = 0) => {
     return nodes.map(node => (
       <div key={node.path}>
@@ -806,6 +829,30 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
         // but every modern browser respects them on a file input.
         {...{ webkitdirectory: '', directory: '' } as Record<string, string>}
       />
+      {projectPath && (
+        <label
+          className="file-tree-toggle"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '6px 12px',
+            fontSize: 12,
+            color: 'var(--text-muted, #9ca3af)',
+            borderBottom: '1px solid var(--border, #2b2b2b)',
+            cursor: 'pointer',
+            userSelect: 'none',
+          }}
+          title="LaTeX produces helper files (.aux, .log, .out, .bbl, …) while compiling. They reappear on every build."
+        >
+          <input
+            type="checkbox"
+            checked={showBuildFiles}
+            onChange={(e) => setShowBuildFiles(e.target.checked)}
+          />
+          Show build files
+        </label>
+      )}
       <div
         className={`file-tree ${dragDestination === projectPath ? 'drop-target' : ''}`}
         onContextMenu={handleEmptyContextMenu}
@@ -819,7 +866,7 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
             <p>No project opened</p>
           </div>
         ) : (
-          renderFileTree(files)
+          renderFileTree(filterTree(files))
         )}
       </div>
 

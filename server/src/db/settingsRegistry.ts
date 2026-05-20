@@ -118,8 +118,8 @@ const REGISTRY: readonly SettingDef[] = [
     description: "Refuse new files once a project exceeds this count. Stops a malicious script from creating millions of tiny files.",
     type: "int", default: 1000, min: 10, max: 100_000 },
   { key: "limits.maxUserDiskMb", group: "limits", label: "Per-user disk quota (MB)",
-    description: "Sum of all of a user's projects. Checked before write.",
-    type: "int", default: 2048, min: 1, max: 1_000_000 },
+    description: "Sum of all of a user's projects. Checked before write; the user sees their remaining headroom on the Projects page.",
+    type: "int", default: 250, min: 1, max: 1_000_000 },
 
   // ---------------- backup ----------------
   { key: "backup.enabled", group: "backup", label: "Backups enabled",

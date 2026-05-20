@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, type GitCommit, type GitDiffFile, type Project, type ProjectMember, type ProjectProposal } from "../api/client";
+import { api, type GitCommit, type GitDiffFile, type Project, type ProjectMember, type ProjectProposal, type QuotaSnapshot } from "../api/client";
 import { useAuth } from "../api/auth-context";
 import { useDocumentTitle } from "../shared/useDocumentTitle";
 
@@ -8,6 +8,7 @@ export function ProjectsPage() {
   useDocumentTitle("Projects - TeXAbr");
   const { user, logout } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
+  const [quota, setQuota] = useState<QuotaSnapshot | null>(null);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [expandedProjectId, setExpandedProjectId] = useState<number | null>(null);
@@ -27,7 +28,10 @@ export function ProjectsPage() {
       setError((err as Error).message);
     }
   }
-  useEffect(() => { void load(); }, []);
+  async function loadQuota() {
+    try { setQuota(await api.quota()); } catch { /* silent; surfaces elsewhere when writes fail */ }
+  }
+  useEffect(() => { void load(); void loadQuota(); }, []);
 
   async function create(e: React.FormEvent) {
     e.preventDefault();
@@ -141,6 +145,7 @@ export function ProjectsPage() {
       <div className="topbar">
         <span className="brand">TeXAbr</span>
         <span className="grow" />
+        {quota && <StorageMeter q={quota} />}
         <span className="muted">{user?.username}</span>
         {user?.role === "admin" && <Link to="/admin">Admin</Link>}
         <button onClick={() => logout()}>Sign out</button>
@@ -216,6 +221,48 @@ export function ProjectsPage() {
           />
         )}
       </div>
+    </div>
+  );
+}
+
+function StorageMeter({ q }: { q: QuotaSnapshot }) {
+  const usedMb = (q.usedBytes / 1024 / 1024).toFixed(q.usedBytes < 1024 * 1024 ? 2 : 1);
+  // Color the bar by fullness: subtle when low, orange near the cap, red over.
+  const color = q.percent >= 100 ? "#dc2626" : q.percent >= 80 ? "#f59e0b" : "#2c8079";
+  return (
+    <div
+      title={`${usedMb} MB used of ${q.capMb} MB (${q.percent}%)`}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        fontSize: 12,
+        color: "var(--text-muted, #9ca3af)",
+        marginRight: 8,
+      }}
+    >
+      <span>Storage</span>
+      <div
+        style={{
+          width: 80,
+          height: 8,
+          background: "rgba(255,255,255,0.08)",
+          borderRadius: 4,
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            width: `${Math.min(100, q.percent)}%`,
+            height: "100%",
+            background: color,
+            transition: "width 0.3s",
+          }}
+        />
+      </div>
+      <span>
+        {usedMb}<span className="muted"> / {q.capMb} MB</span>
+      </span>
     </div>
   );
 }

@@ -13,6 +13,8 @@ import {
   isValidRecoverySeedFormat,
   verifyRecoverySeed,
 } from "../services/recoverySeed";
+import { userDiskUsageBytes } from "../services/quota";
+import { mbToBytes } from "../services/projects";
 
 let lockoutSvc: LockoutService | null = null;
 function getLockout(db: Db): LockoutService {
@@ -263,6 +265,20 @@ export function authRouter(cfg: Config, db: Db) {
 
   r.get("/me", requireAuth(cfg, db), (req, res) => {
     res.json({ user: publicUser(req.user!) });
+  });
+
+  // Per-user disk quota: total bytes consumed by all of the user's owned
+  // projects under dataDir/projects/<userId>/, and the cap from the registry.
+  // The Projects page polls this; uploads / writes that would exceed the cap
+  // are blocked server-side in services/quota.ts.
+  r.get("/quota", requireAuth(cfg, db), async (req, res) => {
+    const me = req.user!;
+    const capMb = db.registry.getInt("limits.maxUserDiskMb");
+    const capBytes = mbToBytes(capMb);
+    const usedBytes = await userDiskUsageBytes(cfg, me.id);
+    const remainingBytes = Math.max(0, capBytes - usedBytes);
+    const percent = capBytes > 0 ? Math.min(100, Math.round((usedBytes / capBytes) * 100)) : 0;
+    res.json({ usedBytes, capBytes, remainingBytes, capMb, percent });
   });
 
   return r;
