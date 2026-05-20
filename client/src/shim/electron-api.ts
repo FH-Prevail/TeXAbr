@@ -189,6 +189,33 @@ async function copyPaths(sources: string[], destination: string) {
   }
 }
 
+// Upload an arbitrary collection of (file, relPath-inside-the-uploaded-bundle)
+// items into a destination directory in the project tree. Used by both the
+// "Upload file(s)" button (relPath = file.name) and the "Upload folder"
+// button / OS drag-drop (relPath = folder/subdir/file.tex preserving the
+// uploaded folder structure).
+//
+// Returns a per-item outcome list so the caller can surface partial failures
+// (e.g. one file rejected by quota).
+async function uploadFiles(
+  items: Array<{ file: File; relPath: string }>,
+  destinationFullPath: string,
+): Promise<{ success: boolean; uploaded: number; errors: Array<{ path: string; error: string }> }> {
+  const destRel = rel(destinationFullPath);
+  const errors: Array<{ path: string; error: string }> = [];
+  let uploaded = 0;
+  for (const item of items) {
+    const joined = [destRel, item.relPath].filter(Boolean).join("/");
+    try {
+      await rest.files.upload(pid(), joined, item.file, currentProposalId);
+      uploaded += 1;
+    } catch (err) {
+      errors.push({ path: item.relPath, error: (err as Error).message });
+    }
+  }
+  return { success: errors.length === 0, uploaded, errors };
+}
+
 async function readDirectory(dirPath: string) {
   try {
     const r = await rest.files.tree(pid(), currentProposalId);
@@ -446,7 +473,7 @@ export function installShim() {
   const api = {
     readFile, readFileBase64, readBinaryFile,
     writeFile, createFile, deletePath, renamePath,
-    readDirectory, createDirectory, copyPaths,
+    readDirectory, createDirectory, copyPaths, uploadFiles,
     saveZipFile,
     watchPath, unwatchPath, onFilesystemEvent,
     openDirectoryDialog, getDefaultProjectsDirectory, showInFileBrowser, openExternal,

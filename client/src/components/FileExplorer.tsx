@@ -10,6 +10,8 @@ import {
   FiFolderPlus,
   FiArchive,
   FiClock,
+  FiUpload,
+  FiUploadCloud,
 } from 'react-icons/fi';
 import InputDialog from './InputDialog';
 import ConfirmDialog from './ConfirmDialog';
@@ -79,7 +81,17 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
     dataUrl: '',
   });
   const [dragDestination, setDragDestination] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
   const reloadTimeoutRef = useRef<number | null>(null);
+  // Two hidden inputs so the toolbar buttons can trigger a file-picker (any
+  // number of files) and a directory-picker (preserves the folder structure
+  // via `webkitRelativePath`).
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
+  // Destination for the next picker open. Set right before .click() so the
+  // change handler knows where to drop the files (project root by default,
+  // or a specific folder when launched from the context menu).
+  const pickerDestinationRef = useRef<string | null>(null);
 
   const loadDirectory = useCallback(async (dirPath: string, parentNode?: FileNode) => {
     const result = await (window as any).api.readDirectory(dirPath);
@@ -232,51 +244,136 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
     }
   };
 
-  const extractPathsFromEvent = (event: React.DragEvent): string[] => {
-    const paths: string[] = [];
-    const fileList = Array.from(event.dataTransfer?.files ?? []);
+  // Walk a FileSystemEntry tree (returned by DataTransferItem.webkitGetAsEntry)
+  // into a flat list of (File, relPath-inside-the-dropped-bundle) pairs.
+  // For a single dropped file, relPath is just file.name. For a dropped
+  // folder, relPath is "folder/sub/file.tex" preserving the source layout.
+  type UploadItem = { file: File; relPath: string };
 
-    fileList.forEach(file => {
-      const filePath = (file as any)?.path;
-      if (filePath && !paths.includes(filePath)) {
-        paths.push(filePath);
-      }
+  const readAllEntries = (reader: any): Promise<any[]> => {
+    return new Promise((resolve, reject) => {
+      const all: any[] = [];
+      const pump = () => {
+        reader.readEntries((batch: any[]) => {
+          if (!batch.length) return resolve(all);
+          all.push(...batch);
+          pump();
+        }, reject);
+      };
+      pump();
     });
-
-    const items = Array.from(event.dataTransfer?.items ?? []);
-    items.forEach(item => {
-      if (item.kind === 'file') {
-        const file = item.getAsFile();
-        const filePath = (file as any)?.path;
-        if (filePath && !paths.includes(filePath)) {
-          paths.push(filePath);
-        }
-      }
-    });
-
-    return paths;
   };
 
-  const copyIntoDirectory = async (sourcePaths: string[], destination: string) => {
+  const walkEntry = async (entry: any, prefix: string, out: UploadItem[]) => {
+    if (entry.isFile) {
+      const file: File = await new Promise((res, rej) => entry.file(res, rej));
+      out.push({ file, relPath: prefix + file.name });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const children = await readAllEntries(reader);
+      const nextPrefix = prefix + entry.name + '/';
+      for (const child of children) {
+        await walkEntry(child, nextPrefix, out);
+      }
+    }
+  };
+
+  const collectFromDropEvent = async (event: React.DragEvent): Promise<UploadItem[]> => {
+    const out: UploadItem[] = [];
+    const items = Array.from(event.dataTransfer?.items ?? []);
+    // Prefer webkitGetAsEntry — it's the only way to get folder contents.
+    // Fall back to .files for browsers that don't expose entries.
+    const usedEntries = items.some(it => typeof (it as any).webkitGetAsEntry === 'function');
+    if (usedEntries) {
+      for (const it of items) {
+        if (it.kind !== 'file') continue;
+        const entry = (it as any).webkitGetAsEntry?.();
+        if (entry) {
+          await walkEntry(entry, '', out);
+        } else {
+          const file = it.getAsFile();
+          if (file) out.push({ file, relPath: file.name });
+        }
+      }
+    } else {
+      for (const file of Array.from(event.dataTransfer?.files ?? [])) {
+        out.push({ file, relPath: file.name });
+      }
+    }
+    return out;
+  };
+
+  // Files from a hidden <input type="file"> picker. When the input has
+  // `webkitdirectory`, every file's `webkitRelativePath` already encodes the
+  // folder path; use it verbatim. Otherwise drop straight into the
+  // destination using just the file name.
+  const collectFromInput = (files: FileList | null, asFolder: boolean): UploadItem[] => {
+    if (!files) return [];
+    const out: UploadItem[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const relPath = asFolder && f.webkitRelativePath ? f.webkitRelativePath : f.name;
+      out.push({ file: f, relPath });
+    }
+    return out;
+  };
+
+  const uploadIntoDirectory = async (items: UploadItem[], destination: string) => {
     if (readOnly) {
       alert('This project is read-only for your account.');
       return;
     }
-    if (!destination || sourcePaths.length === 0) {
+    if (!destination || items.length === 0) {
       return;
     }
 
+    setUploading(true);
     try {
-      const result = await (window as any).api.copyPaths(sourcePaths, destination);
-      if (result?.success) {
-        refreshDirectory(destination);
-      } else if (result?.error) {
-        alert(`Failed to copy files: ${result.error}`);
+      const result = await (window as any).api.uploadFiles(items, destination);
+      refreshDirectory(destination);
+      if (result?.errors?.length) {
+        const summary = result.errors
+          .slice(0, 5)
+          .map((e: { path: string; error: string }) => `  - ${e.path}: ${e.error}`)
+          .join('\n');
+        const more = result.errors.length > 5 ? `\n  ...and ${result.errors.length - 5} more` : '';
+        alert(
+          `${result.uploaded} file${result.uploaded === 1 ? '' : 's'} uploaded, ` +
+          `${result.errors.length} failed:\n${summary}${more}`,
+        );
       }
     } catch (error) {
-      console.error('Error copying files:', error);
-      alert('Failed to copy files into the project.');
+      console.error('Error uploading files:', error);
+      alert(`Failed to upload: ${(error as Error).message}`);
+    } finally {
+      setUploading(false);
     }
+  };
+
+  // Open the hidden picker, remembering where to drop the result.
+  const openFilePicker = (destination: string) => {
+    if (readOnly) return;
+    pickerDestinationRef.current = destination;
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  };
+  const openFolderPicker = (destination: string) => {
+    if (readOnly) return;
+    pickerDestinationRef.current = destination;
+    if (folderInputRef.current) {
+      folderInputRef.current.value = '';
+      folderInputRef.current.click();
+    }
+  };
+
+  const onFileInputChange = async (e: React.ChangeEvent<HTMLInputElement>, asFolder: boolean) => {
+    const dest = pickerDestinationRef.current ?? projectPath;
+    const items = collectFromInput(e.target.files, asFolder);
+    pickerDestinationRef.current = null;
+    if (!items.length || !dest) return;
+    await uploadIntoDirectory(items, dest);
   };
 
   const handleDragOverNode = (event: React.DragEvent<HTMLDivElement>, node: FileNode) => {
@@ -318,14 +415,12 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
 
     event.preventDefault();
     event.stopPropagation();
-    const paths = extractPathsFromEvent(event);
     setDragDestination(null);
-
-    if (paths.length === 0) {
+    const items = await collectFromDropEvent(event);
+    if (items.length === 0) {
       return;
     }
-
-    await copyIntoDirectory(paths, node.path);
+    await uploadIntoDirectory(items, node.path);
   };
 
   const handleRootDragOver = (event: React.DragEvent<HTMLDivElement>) => {
@@ -362,14 +457,12 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
 
     event.preventDefault();
     event.stopPropagation();
-    const paths = extractPathsFromEvent(event);
     setDragDestination(null);
-
-    if (paths.length === 0) {
+    const items = await collectFromDropEvent(event);
+    if (items.length === 0) {
       return;
     }
-
-    await copyIntoDirectory(paths, projectPath);
+    await uploadIntoDirectory(items, projectPath);
   };
 
   const handleContextMenu = (e: React.MouseEvent, file: FileNode) => {
@@ -665,6 +758,26 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
             </span>
           )}
         </div>
+        {projectPath && !readOnly && (
+          <>
+            <button
+              className="header-action-btn"
+              onClick={() => openFilePicker(projectPath)}
+              disabled={uploading}
+              title="Upload file(s) into project root"
+            >
+              <FiUpload size={16} />
+            </button>
+            <button
+              className="header-action-btn"
+              onClick={() => openFolderPicker(projectPath)}
+              disabled={uploading}
+              title="Upload folder into project root"
+            >
+              <FiUploadCloud size={16} />
+            </button>
+          </>
+        )}
         {projectPath && (
           <button
             className="header-action-btn"
@@ -675,6 +788,24 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
           </button>
         )}
       </div>
+      {/* Hidden file inputs driven by the toolbar / context-menu actions. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        style={{ display: 'none' }}
+        onChange={(e) => onFileInputChange(e, false)}
+      />
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        style={{ display: 'none' }}
+        onChange={(e) => onFileInputChange(e, true)}
+        // webkitdirectory / directory aren't in the React DOM type list yet
+        // but every modern browser respects them on a file input.
+        {...{ webkitdirectory: '', directory: '' } as Record<string, string>}
+      />
       <div
         className={`file-tree ${dragDestination === projectPath ? 'drop-target' : ''}`}
         onContextMenu={handleEmptyContextMenu}
@@ -716,6 +847,28 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
               <div className="context-menu-item" onClick={handleCreateFolder}>
                 <FiFolderPlus size={14} />
                 <span>New Folder</span>
+              </div>
+              <div
+                className="context-menu-item"
+                onClick={() => {
+                  const dest = contextMenu?.directoryPath || projectPath;
+                  setContextMenu(null);
+                  openFilePicker(dest);
+                }}
+              >
+                <FiUpload size={14} />
+                <span>Upload File…</span>
+              </div>
+              <div
+                className="context-menu-item"
+                onClick={() => {
+                  const dest = contextMenu?.directoryPath || projectPath;
+                  setContextMenu(null);
+                  openFolderPicker(dest);
+                }}
+              >
+                <FiUploadCloud size={14} />
+                <span>Upload Folder…</span>
               </div>
             </>
           )}

@@ -115,6 +115,31 @@ export const api = {
       }
       return res.blob();
     },
+    // Multipart upload of a single binary file. The path passed in becomes the
+    // target relative path inside the project (parent dirs are auto-created on
+    // the server). Used by FileExplorer's upload buttons and drag-drop handler.
+    upload: async (id: number, relPath: string, file: File, proposalId?: number | null): Promise<{ ok: true; path: string }> => {
+      const fd = new FormData();
+      fd.append("file", file, file.name);
+      fd.append("path", relPath);
+      if (proposalId) fd.append("proposalId", String(proposalId));
+      const csrf = getCsrfToken();
+      const headers: Record<string, string> = {};
+      if (csrf) headers["X-CSRF-Token"] = csrf;
+      const res = await fetch(`/api/files/${id}/upload`, {
+        method: "POST",
+        credentials: "include",
+        headers,
+        body: fd,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        let msg = text;
+        try { msg = (JSON.parse(text) as { error?: string }).error ?? text; } catch { /* keep raw */ }
+        throw new ApiError(res.status, msg);
+      }
+      return res.json() as Promise<{ ok: true; path: string }>;
+    },
   },
 
   compile: (id: number, opts?: { engine?: string; mainFile?: string; proposalId?: number | null }) =>
