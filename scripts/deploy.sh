@@ -116,12 +116,21 @@ fi
 
 log "smoke test"
 # Probe via the local app with the same X-Forwarded-Proto nginx would set,
-# so auth.https.enforced doesn't redirect us away from /api/healthz.
-if curl -fsS -o /dev/null -H "X-Forwarded-Proto: https" \
-     http://127.0.0.1:8217/api/healthz; then
+# so auth.https.enforced doesn't redirect us away from /api/healthz. systemd
+# marks the service "active" as soon as the Node process starts, but the
+# port isn't bound until a moment later — retry briefly to dodge that race.
+healthz_ok=false
+for _ in $(seq 1 15); do
+  if curl -fsS -o /dev/null -H "X-Forwarded-Proto: https" \
+       http://127.0.0.1:8217/api/healthz 2>/dev/null; then
+    healthz_ok=true; break
+  fi
+  sleep 1
+done
+if $healthz_ok; then
   ok "/api/healthz responding"
 else
-  echo "[$(c_red warn)] /api/healthz didn't respond — check 'journalctl -u texabr'"
+  echo "[$(c_red warn)] /api/healthz didn't respond after 15s — check 'journalctl -u texabr'"
 fi
 
 # Drop the previous build now that the new one is verified.
