@@ -24,7 +24,7 @@ set -euo pipefail
 APP_USER="texabr"
 APP_GROUP="texabr"
 INSTALL_DIR="/opt/texabr"
-NODE_BUILD_OPTS="--max-old-space-size=2048"
+NODE_BUILD_OPTS="--max-old-space-size=4096"
 HEALTHZ_TIMEOUT_S=30
 
 c_blue()  { printf "\033[34m%s\033[0m" "$1"; }
