@@ -101,6 +101,13 @@ async function main() {
   app.use("/api/admin", adminRouter(cfg, db));
   app.use("/api/admin/backup", backupRouter(cfg, db));
 
+  // Realtime collab WebSocket service. Activated once the HTTP server is
+  // created below — we attach to its 'upgrade' event so Express + WS share
+  // the same port (8217) and the existing nginx proxy_set_header Upgrade
+  // / Connection bits forward it transparently.
+  const { makeRealtime } = await import("./services/realtime");
+  const realtime = makeRealtime(log);
+
   // Serve built client.
   const clientDist = path.resolve(__dirname, "../../client/dist");
   if (fs.existsSync(clientDist)) {
@@ -120,6 +127,79 @@ async function main() {
         app,
       )
     : http.createServer(app);
+
+  // ── Yjs WebSocket upgrade ────────────────────────────────────────────────
+  // URL: /api/projects/:id/files-yjs?path=<rel>
+  // Auth: texabr.token cookie (JWT) + reader access on the project.
+  // Bypasses Express's router so we can hand the raw socket to the WS lib.
+  const { WebSocketServer } = await import("ws");
+  const jwt = (await import("jsonwebtoken")).default;
+  const { getProjectAccess } = await import("./services/access");
+  const { ensureProjectDir, resolveSafe, FsBoundaryError } = await import("./services/projects");
+
+  const wss = new (WebSocketServer as unknown as typeof import("ws").WebSocketServer)({ noServer: true });
+  const YJS_PATH_RE = /^\/api\/projects\/(\d+)\/files-yjs\?path=(.+)$/;
+
+  function parseCookies(header: string | undefined): Record<string, string> {
+    const out: Record<string, string> = {};
+    if (!header) return out;
+    for (const pair of header.split(";")) {
+      const i = pair.indexOf("=");
+      if (i < 0) continue;
+      const k = pair.slice(0, i).trim();
+      const v = pair.slice(i + 1).trim();
+      out[k] = decodeURIComponent(v);
+    }
+    return out;
+  }
+
+  server.on("upgrade", async (req, socket, head) => {
+    const url = req.url || "";
+    const m = url.match(YJS_PATH_RE);
+    if (!m) {
+      socket.destroy();
+      return;
+    }
+    const projectId = Number(m[1]);
+    const relPath = decodeURIComponent(m[2]);
+
+    const cookies = parseCookies(req.headers.cookie);
+    const token = cookies["texabr.token"];
+    if (!token) { socket.destroy(); return; }
+
+    let decoded: { sub?: number } | null = null;
+    try { decoded = jwt.verify(token, cfg.auth.jwtSecret) as { sub?: number }; }
+    catch { socket.destroy(); return; }
+    if (!decoded?.sub) { socket.destroy(); return; }
+
+    const user = db.users.findById(decoded.sub);
+    if (!user || user.disabled) { socket.destroy(); return; }
+    if (user.token_version !== ((decoded as unknown) as { tv?: number }).tv) {
+      // Session was revoked since the JWT was issued.
+      socket.destroy(); return;
+    }
+
+    // Same access check the HTTP routes use, but without writing to a response.
+    const project = getProjectAccess(db, user, projectId, "reader");
+    if (!project) { socket.destroy(); return; }
+
+    let filePath: string;
+    try {
+      const root = await ensureProjectDir(cfg, project.owner_id, project.id);
+      filePath = resolveSafe(root, relPath);
+    } catch (err) {
+      if (err instanceof FsBoundaryError) { socket.destroy(); return; }
+      log.warn("yjs upgrade: filePath resolve failed", { err, projectId, relPath });
+      socket.destroy();
+      return;
+    }
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      const scopedLog = log.child({ module: "yjs", user: user.username, projectId, relPath });
+      scopedLog.info("yjs: client joined");
+      realtime.handleConnection(ws, filePath, { projectId, relPath }, scopedLog);
+    });
+  });
 
   server.listen(cfg.port, cfg.host, () => {
     const proto = cfg.https.enabled ? "https" : "http";
