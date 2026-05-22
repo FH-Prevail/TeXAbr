@@ -53,6 +53,12 @@ function rel(p: string): string {
   return p.replace(/^\/+/, "");
 }
 
+// Re-exported so non-shim callers (e.g. the realtime collab hook in
+// EditorApp) can produce the same project-relative path the REST endpoints
+// already see. Avoids the double-prefix bug where the virtual root would
+// otherwise be sent verbatim to the server's resolveSafe.
+export function shimRelPath(p: string): string { return rel(p); }
+
 // Re-attach the synthetic root so paths stay consistent throughout the UI.
 function abs(r: string): string {
   if (!r) return shimProjectRoot();

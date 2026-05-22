@@ -18,7 +18,7 @@ import { PresenceBadge } from './components/PresenceBadge';
 import { useRealtimeFile } from './shared/useRealtimeFile';
 import { Annotation, AnnotationRange } from './types/annotations';
 import { CursorPosition, FileNode, PendingCursor, ProjectProvider, useProject } from './ProjectContext';
-import { installShim, setShimProject, setShimProposal, shimProjectRoot } from './shim/electron-api';
+import { installShim, setShimProject, setShimProposal, shimProjectRoot, shimRelPath } from './shim/electron-api';
 import { useAuth } from './api/auth-context';
 import { api as httpApi, type Project, type ProjectProposal } from './api/client';
 import './styles/App.css';
@@ -181,7 +181,14 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
     // last-known snapshot in tabContents). Switching tabs reconnects to a
     // different room. Proposal worktrees skip realtime for now — they're
     // a separate fs path the server's per-project room logic doesn't track.
-    const realtimeFilePath = activeProposalId == null && currentFile && !currentFile.isDirectory ? currentFile.path : null;
+    //
+    // CRITICAL: pass the project-relative path, not the virtual /__texabr__
+    // path the shim uses internally. The server resolves the path under the
+    // project root; without stripping the prefix it would either reject the
+    // path or (worse) silently create a phantom subdirectory.
+    const realtimeFilePath = activeProposalId == null && currentFile && !currentFile.isDirectory
+      ? (() => { try { return shimRelPath(currentFile.path); } catch { return null; } })()
+      : null;
     const realtimeFile = useRealtimeFile(realtimeFilePath ? projectId : null, realtimeFilePath);
     const [proposalPatch, setProposalPatch] = useState<string>('');
     const statusMessageTimeoutRef = useRef<NodeJS.Timeout | null>(null);
