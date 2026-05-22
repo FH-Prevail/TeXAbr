@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { WebSocket } from "ws";
@@ -6,6 +7,7 @@ import * as syncProtocol from "y-protocols/sync";
 import * as awarenessProtocol from "y-protocols/awareness";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
+import type { Config } from "../config";
 import type { Logger } from "./logger";
 
 // Per-(project, file) collaborative editing rooms backed by Yjs. The wire
@@ -27,11 +29,25 @@ import type { Logger } from "./logger";
 const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
 const SAVE_DEBOUNCE_MS = 2_000;
+// How long to keep a room alive in memory after the last client disconnects.
+// Briefly reconnecting clients (e.g. tab refresh, mobile network blip) find
+// the same Y.Doc and avoid a re-hydrate roundtrip — and avoid the rare race
+// where the disk write hasn't fully landed before the room is recreated.
+const GRACE_PERIOD_MS = 60_000;
 // Symbol so the "this update came from disk-seeding, don't echo it" check
 // can never collide with a string origin that arrived legitimately from
 // y-protocols' readSyncMessage (which uses the originating WebSocket as
 // the transaction origin).
 const ORIGIN_SERVER_LOAD = Symbol("server-load");
+
+// Sidecar path for the binary CRDT state. We hash the absolute file path so
+// the sidecar tree never reflects user-visible paths (no need to mirror
+// project structure, no path-traversal surface). Lives under dataDir/yjs-state/
+// so restic backups cover it for free.
+function sidecarPathFor(cfg: Config, filePath: string): string {
+  const hash = crypto.createHash("sha256").update(filePath).digest("hex");
+  return path.join(cfg.dataDir, "yjs-state", `${hash}.bin`);
+}
 
 export interface RoomKey {
   projectId: number;
@@ -48,7 +64,11 @@ interface Room {
   // Track the full set so we clean up every state on disconnect.
   clientIds: Map<WebSocket, Set<number>>;
   filePath: string;
+  sidecarPath: string;
   saveTimer: NodeJS.Timeout | null;
+  // Pending destruction after a grace period when the last client left.
+  // Cancelled if any client rejoins within GRACE_PERIOD_MS.
+  graceTimer: NodeJS.Timeout | null;
   log: Logger;
 }
 
@@ -64,17 +84,33 @@ export interface RealtimeService {
 
 const keyOf = (k: RoomKey) => `${k.projectId}:${k.relPath}`;
 
-export function makeRealtime(rootLog: Logger): RealtimeService {
+export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   const rooms = new Map<string, Room>();
 
   function createRoom(key: string, filePath: string, log: Logger): Room {
     const doc = new Y.Doc();
-    // Seed the doc with current file content. Marked with a special origin
-    // so the update listener below doesn't echo this as a "client edit".
-    let initial = "";
-    try { initial = fs.readFileSync(filePath, "utf8"); } catch { /* file doesn't exist yet, that's fine */ }
-    if (initial.length > 0) {
-      doc.transact(() => doc.getText("content").insert(0, initial), ORIGIN_SERVER_LOAD);
+    const scPath = sidecarPathFor(cfg, filePath);
+
+    // Hydration order: binary CRDT sidecar first (preserves the full doc
+    // history so a reconnecting client's local CRDT items merge cleanly
+    // against server state), then plain text as a fallback for first-time
+    // opens / projects uploaded via HTTP without a sidecar yet.
+    let hydratedFromBin = false;
+    try {
+      const bin = fs.readFileSync(scPath);
+      if (bin.length > 0) {
+        doc.transact(() => Y.applyUpdate(doc, new Uint8Array(bin)), ORIGIN_SERVER_LOAD);
+        hydratedFromBin = true;
+        log.info("realtime: hydrated room from sidecar", { sidecar: scPath, bytes: bin.length });
+      }
+    } catch { /* missing or unreadable — fall through to plain-text seed */ }
+
+    if (!hydratedFromBin) {
+      let initial = "";
+      try { initial = fs.readFileSync(filePath, "utf8"); } catch { /* file doesn't exist yet */ }
+      if (initial.length > 0) {
+        doc.transact(() => doc.getText("content").insert(0, initial), ORIGIN_SERVER_LOAD);
+      }
     }
 
     const awareness = new awarenessProtocol.Awareness(doc);
@@ -85,7 +121,9 @@ export function makeRealtime(rootLog: Logger): RealtimeService {
       clients: new Set(),
       clientIds: new Map(),
       filePath,
+      sidecarPath: scPath,
       saveTimer: null,
+      graceTimer: null,
       log,
     };
 
@@ -137,12 +175,50 @@ export function makeRealtime(rootLog: Logger): RealtimeService {
     }
     const text = room.doc.getText("content").toString();
     try {
-      // Ensure parent dirs exist (e.g. for a brand-new nested path).
+      // Plain text: what pdflatex, backup tools, and external viewers read.
       fs.mkdirSync(path.dirname(room.filePath), { recursive: true });
       fs.writeFileSync(room.filePath, text, "utf8");
-      room.log.debug("realtime: flushed", { key: room.key, bytes: text.length });
+
+      // Binary CRDT state: what re-hydrates the room next time someone opens
+      // this file. Preserves item identity / vector clocks so a reconnecting
+      // client's local edits merge cleanly against server state instead of
+      // being treated as fresh items against a plain-text-seeded doc.
+      fs.mkdirSync(path.dirname(room.sidecarPath), { recursive: true });
+      const update = Y.encodeStateAsUpdate(room.doc);
+      fs.writeFileSync(room.sidecarPath, Buffer.from(update));
+
+      room.log.debug("realtime: flushed", {
+        key: room.key, bytes: text.length, sidecarBytes: update.length,
+      });
     } catch (err) {
       room.log.warn("realtime: flush failed", { key: room.key, err });
+    }
+  }
+
+  function scheduleDestroy(room: Room) {
+    if (room.graceTimer) clearTimeout(room.graceTimer);
+    room.log.info("realtime: room idle, scheduling destruction", {
+      key: room.key, graceMs: GRACE_PERIOD_MS,
+    });
+    room.graceTimer = setTimeout(() => {
+      // Race: a client may have re-joined during the grace window.
+      if (room.clients.size > 0) {
+        room.log.info("realtime: grace expired but clients present; keeping room", { key: room.key });
+        room.graceTimer = null;
+        return;
+      }
+      void (async () => {
+        await saveNow(room);
+        destroyRoom(room);
+      })();
+    }, GRACE_PERIOD_MS);
+  }
+
+  function cancelDestroy(room: Room) {
+    if (room.graceTimer) {
+      clearTimeout(room.graceTimer);
+      room.graceTimer = null;
+      room.log.info("realtime: grace cancelled by re-join", { key: room.key });
     }
   }
 
@@ -162,6 +238,11 @@ export function makeRealtime(rootLog: Logger): RealtimeService {
       room = createRoom(k, filePath, log.child({ room: k }));
       rooms.set(k, room);
       room.log.info("realtime: room opened", { filePath });
+    } else {
+      // A client may rejoin during the post-last-disconnect grace window;
+      // cancel the pending destruction so we keep the in-memory CRDT state
+      // instead of falling back to disk hydration.
+      cancelDestroy(room);
     }
     room.clients.add(ws);
 
@@ -227,12 +308,10 @@ export function makeRealtime(rootLog: Logger): RealtimeService {
       }
       room!.clientIds.delete(ws);
       if (room!.clients.size === 0) {
-        // Last client out: flush synchronously, drop the room. A future
-        // join re-hydrates from disk.
-        void (async () => {
-          await saveNow(room!);
-          destroyRoom(room!);
-        })();
+        // Last client out: persist immediately, then schedule destruction
+        // after the grace period. A reconnect within that window reuses
+        // the same Y.Doc instance (preserves clientIDs + vector clocks).
+        void saveNow(room!).then(() => scheduleDestroy(room!));
       }
     });
 
@@ -287,9 +366,9 @@ export function makeRealtime(rootLog: Logger): RealtimeService {
 // index.ts calls initRealtime once at boot; everything else uses
 // getRealtime() (returns null if not yet initialised, e.g. in tests).
 let _instance: RealtimeService | null = null;
-export function initRealtime(log: Logger): RealtimeService {
+export function initRealtime(log: Logger, cfg: Config): RealtimeService {
   if (_instance) return _instance;
-  _instance = makeRealtime(log);
+  _instance = makeRealtime(log, cfg);
   return _instance;
 }
 export function getRealtime(): RealtimeService | null {

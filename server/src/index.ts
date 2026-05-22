@@ -107,7 +107,7 @@ async function main() {
   // / Connection bits forward it transparently. initRealtime is idempotent
   // and stashes the singleton so latex.ts can flush rooms before a compile.
   const { initRealtime } = await import("./services/realtime");
-  const realtime = initRealtime(log);
+  const realtime = initRealtime(log, cfg);
 
   // Serve built client.
   const clientDist = path.resolve(__dirname, "../../client/dist");
