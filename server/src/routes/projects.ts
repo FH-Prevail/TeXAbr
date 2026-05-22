@@ -165,6 +165,49 @@ export function projectsRouter(cfg: Config, db: Db) {
     res.json({ users: presence.list(p.id, u.id) });
   });
 
+  // Per-(user, project) opaque JSON blob: which tabs were open, which one was
+  // active, etc. Client owns the schema; server caps the payload size to keep
+  // misuse cheap. Reader access only — your state isn't accessible to other
+  // collaborators on the same project.
+  const sGetState = db.raw.prepare<[number, number], { state: string }>(
+    `SELECT state FROM user_project_state WHERE user_id = ? AND project_id = ?`,
+  );
+  const sPutState = db.raw.prepare<[number, number, string, number]>(
+    `INSERT INTO user_project_state (user_id, project_id, state, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(user_id, project_id) DO UPDATE
+       SET state = excluded.state, updated_at = excluded.updated_at`,
+  );
+
+  r.get("/:id/state", (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    const row = sGetState.get(u.id, p.id);
+    let parsed: unknown = null;
+    if (row?.state) {
+      try { parsed = JSON.parse(row.state); } catch { parsed = null; }
+    }
+    res.json({ state: parsed });
+  });
+
+  r.put("/:id/state", (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    const state = req.body?.state;
+    if (state == null || typeof state !== "object") {
+      return res.status(400).json({ error: "state object required" });
+    }
+    const serialised = JSON.stringify(state);
+    // 64 KB ceiling; tab lists for sane projects are well under 1 KB.
+    if (serialised.length > 65_536) {
+      return res.status(413).json({ error: "state too large (>64KB)" });
+    }
+    sPutState.run(u.id, p.id, serialised, Date.now());
+    res.json({ ok: true });
+  });
+
   r.get("/:id/proposals", (req, res) => {
     const u = req.user!;
     const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);

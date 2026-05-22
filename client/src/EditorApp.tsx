@@ -524,6 +524,9 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
             if (openTabs.length === 0) {
                 localStorage.removeItem(sessionStorageKey);
                 cursorPositionsRef.current = new Map();
+                // Also clear the server-side mirror so a switch to another
+                // device doesn't restore stale tabs.
+                void httpApi.projects.putState(projectId, { openFiles: [], activeFile: null }).catch(() => {});
                 return;
             }
             const payload = {
@@ -537,11 +540,19 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
                 })),
             };
             localStorage.setItem(sessionStorageKey, JSON.stringify(payload));
+            // Server-side mirror so the same tab set follows the user across
+            // browsers and devices. Best-effort: a transient failure should
+            // never break local editing.
+            void httpApi.projects.putState(projectId, {
+                openFiles: payload.tabs,
+                activeFile: payload.active,
+                cursors: payload.cursors,
+            }).catch(() => {});
         }
         catch (error) {
             console.warn('Unable to persist session state', error);
         }
-    }, [currentFile, openTabs, projectPath, sessionStorageKey]);
+    }, [currentFile, openTabs, projectPath, sessionStorageKey, projectId]);
     const restoreSession = useCallback(async (projectRoot: string) => {
         if (!projectRoot) {
             return;
@@ -555,27 +566,47 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
         restoredSessionProjectRef.current = projectRoot;
         const pathModule = (window as any).api.path;
         const api = (window as any).api;
-        let sessionText = null;
+
+        // Two sources of session state, in priority order:
+        //   1. Server mirror (follows the user across devices/browsers)
+        //   2. localStorage (fast path, also survives if the network blips)
+        // Server wins when both exist so a switch from laptop to desktop
+        // restores the same tabs.
+        let parsed: any = null;
         try {
-            sessionText = localStorage.getItem(sessionStorageKey);
+            const remote = await httpApi.projects.getState(projectId).catch(() => null);
+            if (remote && remote.state && Array.isArray((remote.state as any).openFiles) && (remote.state as any).openFiles.length > 0) {
+                const s = remote.state as { openFiles: string[]; activeFile?: string | null; cursors?: unknown };
+                parsed = {
+                    version: 1,
+                    tabs: s.openFiles,
+                    active: s.activeFile ?? null,
+                    cursors: Array.isArray(s.cursors) ? s.cursors : [],
+                };
+            }
+        }
+        catch { /* ignore — fall back to local */ }
+
+        if (!parsed) {
+            let sessionText: string | null = null;
+            try {
+                sessionText = localStorage.getItem(sessionStorageKey);
+            }
+            catch (error) {
+                console.warn('Unable to read local session state', error);
+            }
             if (!sessionText) {
                 cursorPositionsRef.current = new Map();
                 return;
             }
-        }
-        catch (error) {
-            console.warn('Unable to read local session state', error);
-            cursorPositionsRef.current = new Map();
-            return;
-        }
-        let parsed: any = {};
-        try {
-            parsed = JSON.parse(sessionText) || {};
-        }
-        catch (error) {
-            console.warn('Invalid local session state', error);
-            cursorPositionsRef.current = new Map();
-            return;
+            try {
+                parsed = JSON.parse(sessionText) || {};
+            }
+            catch (error) {
+                console.warn('Invalid local session state', error);
+                cursorPositionsRef.current = new Map();
+                return;
+            }
         }
         const tabPaths = Array.isArray(parsed?.tabs)
             ? parsed.tabs.filter((value: any) => typeof value === 'string')
@@ -664,7 +695,7 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
                 : `Skipped ${missingPaths.length} missing files from the previous session.`;
             showNotification('Files Missing', message, 'info');
         }
-    }, [currentFile, loadAnnotationsFromFile, openTabs, sessionStorageKey, showNotification, triggerCompile, resetCompileNonce]);
+    }, [currentFile, loadAnnotationsFromFile, openTabs, sessionStorageKey, showNotification, triggerCompile, resetCompileNonce, projectId]);
     const schedulePersistSession = useCallback(() => {
         if (persistSessionTimeoutRef.current) {
             return;

@@ -143,6 +143,19 @@ CREATE TABLE IF NOT EXISTS project_presence (
 );
 CREATE INDEX IF NOT EXISTS idx_presence_seen ON project_presence(last_seen);
 
+-- Opaque JSON blob per (user, project) holding which files the user had
+-- open, which one was active, etc. The server doesn't interpret it — the
+-- client owns the schema and the migration story. Stored separately from
+-- the project so two collaborators on the same project keep independent
+-- tab sets.
+CREATE TABLE IF NOT EXISTS user_project_state (
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  state      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, project_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_file_locks_user ON file_locks(user_id);
 CREATE INDEX IF NOT EXISTS idx_file_locks_expiry ON file_locks(expires_at);
 

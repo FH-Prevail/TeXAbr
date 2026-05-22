@@ -92,6 +92,19 @@ const MIGRATIONS: Migration[] = [
       db.exec(`CREATE INDEX IF NOT EXISTS idx_presence_seen ON project_presence(last_seen)`);
     },
   },
+  {
+    version: 6,
+    name: "user_project_state",
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS user_project_state (
+        user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        state      TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, project_id)
+      )`);
+    },
+  },
 ];
 
 export function migrate(raw: Database.Database, cfg: Config) {

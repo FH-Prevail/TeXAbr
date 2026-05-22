@@ -73,6 +73,9 @@ export const api = {
     history: (id: number) => call<{ history: GitCommit[] }>("GET", `/api/projects/${id}/history`),
     presence: (id: number) => call<{ users: PresenceUser[] }>("GET", `/api/projects/${id}/presence`),
     heartbeat: (id: number) => call<{ ok: true }>("POST", `/api/projects/${id}/presence`),
+    getState:  (id: number) => call<{ state: ProjectUiState | null }>("GET", `/api/projects/${id}/state`),
+    putState:  (id: number, state: ProjectUiState) =>
+      call<{ ok: true }>("PUT", `/api/projects/${id}/state`, { state }),
     proposals: (id: number) => call<{ proposals: ProjectProposal[] }>("GET", `/api/projects/${id}/proposals`),
     createProposal: (id: number, b: { title: string; description?: string }) =>
       call<{ proposal: ProjectProposal }>("POST", `/api/projects/${id}/proposals`, b),
@@ -245,6 +248,14 @@ export interface MetaResponse {
   bootstrapNeeded: boolean;
 }
 export interface AuthResponse { user: User; recoverySeed?: string; }
+export interface ProjectUiState {
+  openFiles?: string[];          // relative paths of open editor tabs
+  activeFile?: string | null;    // path of the focused tab
+  // Reserved for future shape additions (cursor positions, split sizes, …)
+  // The server treats this as opaque JSON.
+  [key: string]: unknown;
+}
+
 export interface PresenceUser {
   user_id: number;
   username: string;
