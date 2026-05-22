@@ -14,6 +14,7 @@ import TabBar from './components/TabBar';
 import AboutDialog from './components/AboutDialog';
 import AnnotationDialog from './components/AnnotationDialog';
 import StatusBar from './components/StatusBar';
+import { PresenceBadge } from './components/PresenceBadge';
 import { Annotation, AnnotationRange } from './types/annotations';
 import { CursorPosition, FileNode, PendingCursor, ProjectProvider, useProject } from './ProjectContext';
 import { installShim, setShimProject, setShimProposal, shimProjectRoot } from './shim/electron-api';
@@ -1688,6 +1689,7 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
                     )}
                 </>
             )}
+            <PresenceBadge projectId={projectId} />
         </div>
         {proposalPatch && (
             <pre className="proposal-diff">{proposalPatch}</pre>

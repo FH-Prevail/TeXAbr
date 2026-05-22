@@ -130,6 +130,19 @@ CREATE TABLE IF NOT EXISTS file_locks (
   PRIMARY KEY (project_id, rel_path)
 );
 
+-- Per-project presence ledger. Each collaborator hits a heartbeat endpoint
+-- while they have the editor open; the server upserts (project, user) with
+-- the current timestamp. Other collaborators query the list and render a
+-- small "who else is here" badge. There is no chat / cursor data — just
+-- "last time this user was viewing this project". Pruned by TTL at read time.
+CREATE TABLE IF NOT EXISTS project_presence (
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  last_seen  INTEGER NOT NULL,
+  PRIMARY KEY (project_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_presence_seen ON project_presence(last_seen);
+
 CREATE INDEX IF NOT EXISTS idx_file_locks_user ON file_locks(user_id);
 CREATE INDEX IF NOT EXISTS idx_file_locks_expiry ON file_locks(expires_at);
 

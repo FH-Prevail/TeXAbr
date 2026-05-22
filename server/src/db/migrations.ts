@@ -79,6 +79,19 @@ const MIGRATIONS: Migration[] = [
       addColumnIfMissing(db, "users", "recovery_seed_hash", "TEXT");
     },
   },
+  {
+    version: 5,
+    name: "project_presence",
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS project_presence (
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        last_seen  INTEGER NOT NULL,
+        PRIMARY KEY (project_id, user_id)
+      )`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_presence_seen ON project_presence(last_seen)`);
+    },
+  },
 ];
 
 export function migrate(raw: Database.Database, cfg: Config) {

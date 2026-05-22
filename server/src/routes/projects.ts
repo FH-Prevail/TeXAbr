@@ -18,10 +18,12 @@ import {
   removeProposalWorktree,
 } from "../services/git";
 import { ensureProjectDir, projectDir, resolveSafe, slugify, STARTER_TEX, FsBoundaryError } from "../services/projects";
+import { makePresence } from "../services/presence";
 
 export function projectsRouter(cfg: Config, db: Db) {
   const r = Router();
   r.use(requireAuth(cfg, db));
+  const presence = makePresence(db.raw);
 
   r.get("/", (req, res) => {
     const u = req.user!;
@@ -142,6 +144,25 @@ export function projectsRouter(cfg: Config, db: Db) {
     if (!p) return;
     const root = await ensureProjectDir(cfg, p.owner_id, p.id);
     res.json({ history: await listHistory(root) });
+  });
+
+  // Presence: who else is looking at this project right now.
+  // Heartbeat: editor pings ~30s while visible. List: editor polls similarly.
+  r.post("/:id/presence", (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    presence.heartbeat(p.id, u.id);
+    res.json({ ok: true });
+  });
+  r.get("/:id/presence", (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    // Mark the caller present too so /presence doubles as a heartbeat for
+    // simple clients that only poll the GET and never POST.
+    presence.heartbeat(p.id, u.id);
+    res.json({ users: presence.list(p.id, u.id) });
   });
 
   r.get("/:id/proposals", (req, res) => {

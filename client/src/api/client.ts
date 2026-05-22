@@ -71,6 +71,8 @@ export const api = {
     unshare: (id: number, userId: number) =>
       call<{ members: ProjectMember[] }>("DELETE", `/api/projects/${id}/shares/${userId}`),
     history: (id: number) => call<{ history: GitCommit[] }>("GET", `/api/projects/${id}/history`),
+    presence: (id: number) => call<{ users: PresenceUser[] }>("GET", `/api/projects/${id}/presence`),
+    heartbeat: (id: number) => call<{ ok: true }>("POST", `/api/projects/${id}/presence`),
     proposals: (id: number) => call<{ proposals: ProjectProposal[] }>("GET", `/api/projects/${id}/proposals`),
     createProposal: (id: number, b: { title: string; description?: string }) =>
       call<{ proposal: ProjectProposal }>("POST", `/api/projects/${id}/proposals`, b),
@@ -243,6 +245,13 @@ export interface MetaResponse {
   bootstrapNeeded: boolean;
 }
 export interface AuthResponse { user: User; recoverySeed?: string; }
+export interface PresenceUser {
+  user_id: number;
+  username: string;
+  last_seen: number;
+  status: "online" | "idle";
+}
+
 export interface QuotaSnapshot {
   usedBytes: number;
   capBytes: number;
