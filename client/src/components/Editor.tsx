@@ -187,6 +187,13 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({
   const annotationsRef = useRef<Annotation[]>(annotations);
   const lastContextMenuPositionRef = useRef<{ lineNumber: number; column: number } | null>(null);
   const onSyncTexForwardSearchRef = useRef(onSyncTexForwardSearch);
+  // Stable ref to onChange so the MonacoBinding effect below doesn't tear
+  // down and rebuild the binding on every parent re-render (the parent's
+  // onChange is recreated on each render in EditorApp). Rebuilding the
+  // binding repeatedly leaks Yjs observer wiring and Monaco model state —
+  // tab grew from 119 MB to 1.4 GB over an idle hour before this was fixed.
+  const onChangeRef = useRef(onChange);
+  useEffect(() => { onChangeRef.current = onChange; }, [onChange]);
   // Keep annotations ref up to date
   useEffect(() => {
     annotationsRef.current = annotations;
@@ -213,7 +220,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({
     const editors = new Set<monaco.editor.IStandaloneCodeEditor>([editorRef.current as monaco.editor.IStandaloneCodeEditor]);
     yBindingRef.current = new MonacoBinding(yText, model, editors, yAwareness ?? null);
 
-    const syncSnapshot = () => onChange(yText.toString());
+    const syncSnapshot = () => onChangeRef.current(yText.toString());
     yText.observe(syncSnapshot);
     // Push an initial snapshot too in case the doc was already populated
     // from a remote peer before the binding attached.
@@ -226,7 +233,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({
         yBindingRef.current = null;
       }
     };
-  }, [yText, yAwareness, onChange]);
+  }, [yText, yAwareness]);
 
   useEffect(() => {
     onSyncTexForwardSearchRef.current = onSyncTexForwardSearch;

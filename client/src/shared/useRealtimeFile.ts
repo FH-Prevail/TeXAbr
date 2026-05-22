@@ -65,7 +65,22 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
     };
     provider.on("status", onStatus);
 
+    // Backgrounded tabs in Chrome throttle timers and WS heartbeats, which
+    // makes y-websocket's reconnect loop flap repeatedly. Each flap fires a
+    // status event and re-renders, and historically also leaked binding
+    // state. Pausing the provider while hidden is also nicer to the server
+    // (fewer awareness pings) and the user's battery.
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        try { provider.disconnect(); } catch { /* already disconnected */ }
+      } else {
+        try { provider.connect(); } catch { /* already connected */ }
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
       provider.off("status", onStatus);
       try { provider.disconnect(); } catch { /* already disconnected */ }
       try { provider.destroy(); } catch { /* already destroyed */ }
