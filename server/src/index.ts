@@ -104,9 +104,10 @@ async function main() {
   // Realtime collab WebSocket service. Activated once the HTTP server is
   // created below — we attach to its 'upgrade' event so Express + WS share
   // the same port (8217) and the existing nginx proxy_set_header Upgrade
-  // / Connection bits forward it transparently.
-  const { makeRealtime } = await import("./services/realtime");
-  const realtime = makeRealtime(log);
+  // / Connection bits forward it transparently. initRealtime is idempotent
+  // and stashes the singleton so latex.ts can flush rooms before a compile.
+  const { initRealtime } = await import("./services/realtime");
+  const realtime = initRealtime(log);
 
   // Serve built client.
   const clientDist = path.resolve(__dirname, "../../client/dist");
@@ -166,6 +167,27 @@ async function main() {
     }
     const projectId = Number(m[1]);
     const relPath = decodeURIComponent(m[2]);
+
+    // Origin allow-list. Browsers DON'T enforce same-origin on WebSocket the
+    // way they do on XHR/fetch, so a hostile site can otherwise spin up a WS
+    // to this server with the user's auth cookie attached (cookie SameSite
+    // mitigates but doesn't fully cover this). Explicit Origin check on
+    // upgrade is the proper CSRF defense for cookie-authenticated sockets.
+    // Allowed origins: any of texabr.org / editor.texabr.org plus localhost
+    // for dev. To loosen, set the auth.csrf.allowedOrigins setting (TODO:
+    // wire to the registry once we need per-host customisation).
+    const allowedOrigins = new Set([
+      "https://texabr.org",
+      "https://editor.texabr.org",
+      "http://localhost:8217",
+      "http://127.0.0.1:8217",
+    ]);
+    const origin = (req.headers.origin || "").toLowerCase();
+    if (origin && !allowedOrigins.has(origin)) {
+      log.warn("ws upgrade: origin rejected", { origin, url });
+      socket.destroy();
+      return;
+    }
 
     const cookies = parseCookies(req.headers.cookie);
     const token = cookies["texabr.token"];

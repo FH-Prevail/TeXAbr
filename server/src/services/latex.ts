@@ -6,6 +6,7 @@ import { FsBoundaryError, mbToBytes, pathSizeBytes, resolveSafe } from "./projec
 import { detectSandbox, spawnSandboxed } from "./sandbox";
 import { makeCompileQueue, type CompileQueue } from "./compileQueue";
 import { trackProc, untrackProc } from "./shutdown";
+import { getRealtime } from "./realtime";
 
 export interface CompileResult {
   ok: boolean;
@@ -122,6 +123,16 @@ export async function compile(
       untrackProc(activePid);
       return result;
     };
+
+    // Flush any active Yjs room for the main file to disk BEFORE pdflatex
+    // reads it. Without this, edits that happened in the last <2s of typing
+    // (the room's debounce window) would compile against stale bytes.
+    // The .gz file the synctex tool emits is also derived from this read.
+    const rt = getRealtime();
+    if (rt) {
+      try { await rt.flushBeforeCompile(mainAbs); }
+      catch (err) { db.log.warn("realtime flushBeforeCompile failed", { err, mainAbs }); }
+    }
 
     const r1 = await run();
     let last = r1;

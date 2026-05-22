@@ -190,6 +190,18 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
       ? (() => { try { return shimRelPath(currentFile.path); } catch { return null; } })()
       : null;
     const realtimeFile = useRealtimeFile(realtimeFilePath ? projectId : null, realtimeFilePath);
+    // When Yjs is bound and connected for the active file, HTTP autosave for
+    // THAT file becomes a dual-writer race: a stale local snapshot could
+    // overwrite the Yjs-persisted disk state. Persistence is handled by the
+    // server's 2s-debounced room flush (and explicitly before any compile),
+    // so the HTTP path can safely be suppressed. Background tabs are NOT in
+    // realtime mode and still need HTTP saves.
+    const isCurrentFileRealtime = !!(realtimeFile.yText && realtimeFile.status === "connected");
+    // While we're expecting realtime for this file but the WS hasn't reached
+    // 'connected' yet, lock Monaco read-only. Otherwise the user could type
+    // into the pre-binding model and have those keystrokes overwritten when
+    // MonacoBinding attaches and reconciles the model to the server's Y.Text.
+    const realtimeStillConnecting = !!(realtimeFilePath && !isCurrentFileRealtime);
     const [proposalPatch, setProposalPatch] = useState<string>('');
     const statusMessageTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const [showStructureMap, setShowStructureMap] = useState<boolean>(false);
@@ -1274,7 +1286,11 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
             }
             autoCompileTimeout.current = setTimeout(() => {
                 void (async () => {
-                    if (autoSave && currentFile && !currentFile.isDirectory) {
+                    // Skip the HTTP write when this file is in realtime mode:
+                    // the Yjs room is the source of truth and the compile
+                    // path explicitly flushes the room to disk just before
+                    // pdflatex runs (services/latex.ts).
+                    if (autoSave && currentFile && !currentFile.isDirectory && !isCurrentFileRealtime) {
                         const api = (window as any).api;
                         await api.writeFile(currentFile.path, content);
                     }
@@ -1287,12 +1303,16 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
         if (!isCurrentFileLatex) {
             return;
         }
-        if (!isReadOnlyProject && currentFile && !currentFile.isDirectory) {
+        // Same as the autosave path: when realtime is bound, the server-side
+        // flushBeforeCompile takes care of getting the latest CRDT bytes onto
+        // disk just before pdflatex starts. HTTP writeFile would dual-write
+        // a stale snapshot.
+        if (!isReadOnlyProject && !isCurrentFileRealtime && currentFile && !currentFile.isDirectory) {
             const api = (window as any).api;
             await api.writeFile(currentFile.path, editorContent);
         }
         triggerCompile();
-    }, [currentFile, editorContent, isCurrentFileLatex, isReadOnlyProject, triggerCompile]);
+    }, [currentFile, editorContent, isCurrentFileLatex, isReadOnlyProject, isCurrentFileRealtime, triggerCompile]);
 
     const handleSaveCurrentFile = useCallback(async () => {
         if (isReadOnlyProject) {
@@ -1305,13 +1325,20 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
         }
 
         try {
+            if (isCurrentFileRealtime) {
+                // The Yjs room is the source of truth; the server's debounced
+                // flush writes to disk on its own and a manual Ctrl+S just
+                // confirms the state is synced.
+                showNotification('Synced', `${currentFile.name} is collaborating in real time`, 'success');
+                return;
+            }
             const api = (window as any).api;
             await api.writeFile( currentFile.path, editorContent);
             showNotification('File Saved', `Saved ${currentFile.name}`, 'success');
         } catch (error) {
             showNotification('Save Failed', `Failed to save ${currentFile.name}: ${error}`, 'error');
         }
-    }, [currentFile, editorContent, isReadOnlyProject, showNotification]);
+    }, [currentFile, editorContent, isReadOnlyProject, isCurrentFileRealtime, showNotification]);
 
     const handleSaveAllFiles = useCallback(async () => {
         if (isReadOnlyProject) {
@@ -1787,7 +1814,7 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
                                 onCursorChange={handleCursorChange}
                                 onSyncTexForwardSearch={handleForwardSearch}
                                 theme={resolvedTheme}
-                                readOnly={isReadOnlyProject}
+                                readOnly={isReadOnlyProject || realtimeStillConnecting}
                                 yText={realtimeFile.yText}
                                 yAwareness={realtimeFile.awareness}
                             />

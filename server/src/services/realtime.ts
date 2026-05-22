@@ -27,6 +27,11 @@ import type { Logger } from "./logger";
 const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
 const SAVE_DEBOUNCE_MS = 2_000;
+// Symbol so the "this update came from disk-seeding, don't echo it" check
+// can never collide with a string origin that arrived legitimately from
+// y-protocols' readSyncMessage (which uses the originating WebSocket as
+// the transaction origin).
+const ORIGIN_SERVER_LOAD = Symbol("server-load");
 
 export interface RoomKey {
   projectId: number;
@@ -38,7 +43,10 @@ interface Room {
   doc: Y.Doc;
   awareness: awarenessProtocol.Awareness;
   clients: Set<WebSocket>;
-  clientIds: Map<WebSocket, number>;   // ws -> Y.Doc clientID for awareness cleanup
+  // Multiple awareness clientIds may belong to the same socket (a peer can
+  // publish state on behalf of itself plus echoed-back peers in one update).
+  // Track the full set so we clean up every state on disconnect.
+  clientIds: Map<WebSocket, Set<number>>;
   filePath: string;
   saveTimer: NodeJS.Timeout | null;
   log: Logger;
@@ -66,7 +74,7 @@ export function makeRealtime(rootLog: Logger): RealtimeService {
     let initial = "";
     try { initial = fs.readFileSync(filePath, "utf8"); } catch { /* file doesn't exist yet, that's fine */ }
     if (initial.length > 0) {
-      doc.transact(() => doc.getText("content").insert(0, initial), "server-load");
+      doc.transact(() => doc.getText("content").insert(0, initial), ORIGIN_SERVER_LOAD);
     }
 
     const awareness = new awarenessProtocol.Awareness(doc);
@@ -83,7 +91,7 @@ export function makeRealtime(rootLog: Logger): RealtimeService {
 
     // Broadcast updates to all peers except the origin; also debounce-save.
     doc.on("update", (update: Uint8Array, origin: unknown) => {
-      if (origin === "server-load") return;
+      if (origin === ORIGIN_SERVER_LOAD) return;
       const enc = encoding.createEncoder();
       encoding.writeVarUint(enc, MESSAGE_SYNC);
       syncProtocol.writeUpdate(enc, update);
@@ -140,6 +148,9 @@ export function makeRealtime(rootLog: Logger): RealtimeService {
 
   function destroyRoom(room: Room) {
     rooms.delete(room.key);
+    // awareness.destroy() unregisters timers and listeners; do it first so
+    // the doc destruction below can't leave dangling awareness state.
+    try { room.awareness.destroy(); } catch { /* already destroyed */ }
     try { room.doc.destroy(); } catch { /* already destroyed */ }
     room.log.info("realtime: room closed", { key: room.key });
   }
@@ -178,16 +189,21 @@ export function makeRealtime(rootLog: Logger): RealtimeService {
           }
           case MESSAGE_AWARENESS: {
             const update = decoding.readVarUint8Array(decoder);
-            // Track the first awareness client ID we see for this ws so the
-            // cleanup on disconnect is precise.
+            // Track every clientId that this socket announces. A single
+            // awareness update can carry multiple clientIds; we record them
+            // all so the disconnect cleanup removes every state the socket
+            // owns, not just the first one we noticed.
             try {
               const inner = decoding.createDecoder(update);
               const count = decoding.readVarUint(inner);
-              if (count > 0) {
+              let bag = room!.clientIds.get(ws);
+              if (!bag) { bag = new Set(); room!.clientIds.set(ws, bag); }
+              for (let i = 0; i < count; i++) {
                 const cid = decoding.readVarUint(inner);
-                if (!room!.clientIds.has(ws)) {
-                  room!.clientIds.set(ws, cid);
-                }
+                bag.add(cid);
+                // Skip the rest of this client's entry (clock + state JSON).
+                decoding.readVarUint(inner);       // clock
+                decoding.readVarString(inner);     // state JSON
               }
             } catch { /* malformed awareness update — drop */ }
             awarenessProtocol.applyAwarenessUpdate(room!.awareness, update, ws);
@@ -205,11 +221,11 @@ export function makeRealtime(rootLog: Logger): RealtimeService {
 
     ws.on("close", () => {
       room!.clients.delete(ws);
-      const cid = room!.clientIds.get(ws);
-      if (cid !== undefined) {
-        awarenessProtocol.removeAwarenessStates(room!.awareness, [cid], "disconnect");
-        room!.clientIds.delete(ws);
+      const ids = room!.clientIds.get(ws);
+      if (ids && ids.size > 0) {
+        awarenessProtocol.removeAwarenessStates(room!.awareness, Array.from(ids), "disconnect");
       }
+      room!.clientIds.delete(ws);
       if (room!.clients.size === 0) {
         // Last client out: flush synchronously, drop the room. A future
         // join re-hydrates from disk.
@@ -264,4 +280,18 @@ export function makeRealtime(rootLog: Logger): RealtimeService {
 
   rootLog.info("realtime: service ready");
   return { handleConnection, flushBeforeCompile, status };
+}
+
+// Module-level singleton so the compile flow can call flushBeforeCompile()
+// from latex.ts without threading a service handle through every route.
+// index.ts calls initRealtime once at boot; everything else uses
+// getRealtime() (returns null if not yet initialised, e.g. in tests).
+let _instance: RealtimeService | null = null;
+export function initRealtime(log: Logger): RealtimeService {
+  if (_instance) return _instance;
+  _instance = makeRealtime(log);
+  return _instance;
+}
+export function getRealtime(): RealtimeService | null {
+  return _instance;
 }
