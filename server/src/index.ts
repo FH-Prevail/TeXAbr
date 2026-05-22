@@ -138,7 +138,11 @@ async function main() {
   const { ensureProjectDir, resolveSafe, FsBoundaryError } = await import("./services/projects");
 
   const wss = new (WebSocketServer as unknown as typeof import("ws").WebSocketServer)({ noServer: true });
-  const YJS_PATH_RE = /^\/api\/projects\/(\d+)\/files-yjs\?path=(.+)$/;
+  // y-websocket's WebsocketProvider builds URLs of the form
+  //   <serverUrl>/<roomName>?query
+  // so we accept anything after /files-yjs/ as the room (= relative path)
+  // and ignore optional query string.
+  const YJS_PATH_RE = /^\/api\/projects\/(\d+)\/files-yjs\/([^?]+)/;
 
   function parseCookies(header: string | undefined): Record<string, string> {
     const out: Record<string, string> = {};

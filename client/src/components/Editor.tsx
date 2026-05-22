@@ -1,6 +1,9 @@
 import React, { useRef, forwardRef, useImperativeHandle, useEffect, useCallback } from 'react';
 import MonacoEditor, { loader } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
+import * as Y from 'yjs';
+import { MonacoBinding } from 'y-monaco';
+import type { Awareness } from 'y-protocols/awareness';
 import { Annotation, AnnotationRange } from '../types/annotations';
 import '../styles/Editor.css';
 
@@ -137,6 +140,12 @@ interface EditorProps {
   onSyncTexForwardSearch?: () => void;
   theme: 'dark' | 'light';
   readOnly?: boolean;
+  // When set, bind Monaco to the Y.Text via MonacoBinding instead of the
+  // local `content` string. `content` is then ignored as the source of truth
+  // (Y.Text owns it), and `onChange` still fires on every doc update so the
+  // surrounding app can keep its own snapshot up to date.
+  yText?: Y.Text | null;
+  yAwareness?: Awareness | null;
 }
 
 export interface EditorHandle {
@@ -166,9 +175,12 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({
   onCursorChange,
   onSyncTexForwardSearch,
   theme,
-  readOnly = false
+  readOnly = false,
+  yText,
+  yAwareness,
 }, ref) => {
   const editorRef = useRef<any>(null);
+  const yBindingRef = useRef<MonacoBinding | null>(null);
   const cursorListenerRef = useRef<any>(null);
   const decorationIdsRef = useRef<string[]>([]);
   const colorClassMapRef = useRef<Map<string, string>>(new Map());
@@ -179,6 +191,42 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({
   useEffect(() => {
     annotationsRef.current = annotations;
   }, [annotations]);
+
+  // Bind Monaco to the Y.Text when one is provided. The binding takes over
+  // the model — Monaco's text becomes a view of the CRDT. Remote edits land
+  // here automatically; local edits propagate over y-websocket to peers.
+  // Re-runs when yText changes (e.g. user switched files) so we tear down
+  // the previous binding cleanly first.
+  //
+  // Side mirror: keep the parent's `content` snapshot in sync via onChange
+  // on every Y.Text change. The compile flow, preview, and structure map
+  // still read content from the snapshot, so they need to see what Yjs
+  // currently holds — including edits that came from remote peers.
+  useEffect(() => {
+    if (yBindingRef.current) {
+      try { yBindingRef.current.destroy(); } catch { /* already gone */ }
+      yBindingRef.current = null;
+    }
+    if (!yText || !editorRef.current) return;
+    const model = editorRef.current.getModel?.();
+    if (!model) return;
+    const editors = new Set<monaco.editor.IStandaloneCodeEditor>([editorRef.current as monaco.editor.IStandaloneCodeEditor]);
+    yBindingRef.current = new MonacoBinding(yText, model, editors, yAwareness ?? null);
+
+    const syncSnapshot = () => onChange(yText.toString());
+    yText.observe(syncSnapshot);
+    // Push an initial snapshot too in case the doc was already populated
+    // from a remote peer before the binding attached.
+    syncSnapshot();
+
+    return () => {
+      try { yText.unobserve(syncSnapshot); } catch { /* doc destroyed */ }
+      if (yBindingRef.current) {
+        try { yBindingRef.current.destroy(); } catch { /* already gone */ }
+        yBindingRef.current = null;
+      }
+    };
+  }, [yText, yAwareness, onChange]);
 
   useEffect(() => {
     onSyncTexForwardSearchRef.current = onSyncTexForwardSearch;
@@ -728,7 +776,10 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({
           <MonacoEditor
             height="100%"
             language={getLanguage()}
-            value={content}
+            // When MonacoBinding owns the model, leaving `value` set would
+            // fight the CRDT (every re-render of the parent would try to
+            // overwrite the text). Drop it for the realtime path.
+            value={yText ? undefined : content}
             onChange={handleEditorChange}
             onMount={handleEditorDidMount}
             theme={theme === 'dark' ? 'vs-dark' : 'vs-light'}

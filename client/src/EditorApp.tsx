@@ -15,6 +15,7 @@ import AboutDialog from './components/AboutDialog';
 import AnnotationDialog from './components/AnnotationDialog';
 import StatusBar from './components/StatusBar';
 import { PresenceBadge } from './components/PresenceBadge';
+import { useRealtimeFile } from './shared/useRealtimeFile';
 import { Annotation, AnnotationRange } from './types/annotations';
 import { CursorPosition, FileNode, PendingCursor, ProjectProvider, useProject } from './ProjectContext';
 import { installShim, setShimProject, setShimProposal, shimProjectRoot } from './shim/electron-api';
@@ -175,6 +176,13 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
     }, [projectInfo]);
     const [proposals, setProposals] = useState<ProjectProposal[]>([]);
     const [activeProposalId, setActiveProposalId] = useState<number | null>(null);
+    // Real-time collab binding for the file currently shown in the editor.
+    // Only the active tab is wired to a Yjs room (background tabs hold their
+    // last-known snapshot in tabContents). Switching tabs reconnects to a
+    // different room. Proposal worktrees skip realtime for now — they're
+    // a separate fs path the server's per-project room logic doesn't track.
+    const realtimeFilePath = activeProposalId == null && currentFile && !currentFile.isDirectory ? currentFile.path : null;
+    const realtimeFile = useRealtimeFile(realtimeFilePath ? projectId : null, realtimeFilePath);
     const [proposalPatch, setProposalPatch] = useState<string>('');
     const statusMessageTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const [showStructureMap, setShowStructureMap] = useState<boolean>(false);
@@ -1773,6 +1781,8 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
                                 onSyncTexForwardSearch={handleForwardSearch}
                                 theme={resolvedTheme}
                                 readOnly={isReadOnlyProject}
+                                yText={realtimeFile.yText}
+                                yAwareness={realtimeFile.awareness}
                             />
                             {showAnnotationsPanel && (
                                 <AnnotationPanel
