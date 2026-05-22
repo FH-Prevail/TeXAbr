@@ -1,4 +1,4 @@
-import React, { useRef, forwardRef, useImperativeHandle, useEffect, useCallback } from 'react';
+import React, { useRef, useState, forwardRef, useImperativeHandle, useEffect, useCallback } from 'react';
 import MonacoEditor, { loader } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
 import * as Y from 'yjs';
@@ -180,6 +180,11 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({
   yAwareness,
 }, ref) => {
   const editorRef = useRef<any>(null);
+  // State copy of the Monaco editor instance. The MonacoBinding effect
+  // depends on this so it actually re-runs once Monaco finishes mounting
+  // and gives us the editor — otherwise the effect runs once on first
+  // render with editorRef.current === null and never fires again.
+  const [editorInstance, setEditorInstance] = useState<monaco.editor.IStandaloneCodeEditor | null>(null);
   const yBindingRef = useRef<MonacoBinding | null>(null);
   const cursorListenerRef = useRef<any>(null);
   const decorationIdsRef = useRef<string[]>([]);
@@ -214,10 +219,10 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({
       try { yBindingRef.current.destroy(); } catch { /* already gone */ }
       yBindingRef.current = null;
     }
-    if (!yText || !editorRef.current) return;
-    const model = editorRef.current.getModel?.();
+    if (!yText || !editorInstance) return;
+    const model = editorInstance.getModel?.();
     if (!model) return;
-    const editors = new Set<monaco.editor.IStandaloneCodeEditor>([editorRef.current as monaco.editor.IStandaloneCodeEditor]);
+    const editors = new Set<monaco.editor.IStandaloneCodeEditor>([editorInstance]);
     yBindingRef.current = new MonacoBinding(yText, model, editors, yAwareness ?? null);
 
     const syncSnapshot = () => onChangeRef.current(yText.toString());
@@ -233,7 +238,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({
         yBindingRef.current = null;
       }
     };
-  }, [yText, yAwareness]);
+  }, [yText, yAwareness, editorInstance]);
 
   useEffect(() => {
     onSyncTexForwardSearchRef.current = onSyncTexForwardSearch;
@@ -372,6 +377,7 @@ const Editor = forwardRef<EditorHandle, EditorProps>(({
 
   const handleEditorDidMount = (editor: any, monaco: any) => {
     editorRef.current = editor;
+    setEditorInstance(editor);
     registerCursorListener();
     // Add click handler for glyph margin to remove annotations
     editor.onMouseDown((e: any) => {
