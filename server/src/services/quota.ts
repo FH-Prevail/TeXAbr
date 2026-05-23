@@ -39,6 +39,14 @@ export async function ensureUserHasRoom(
 
 // Recursive file count under a directory. Used to enforce
 // limits.maxFilesPerProject before creating a new file.
+//
+// Hidden entries (anything starting with ".") are skipped. The big one is
+// .git/ — per-project git history stores one object per file per commit,
+// so a 30-file project that's been edited a hundred times can easily have
+// 3000+ files under .git/objects and falsely trip the cap. The cap exists
+// to bound user-visible content (zip-bomb uploads, runaway backup loops),
+// not internal storage. .latexmk caches and similar dot-dirs are excluded
+// for the same reason.
 export async function countFiles(root: string): Promise<number> {
   let n = 0;
   async function walk(dir: string) {
@@ -49,6 +57,7 @@ export async function countFiles(root: string): Promise<number> {
       return;
     }
     for (const e of entries) {
+      if (e.name.startsWith(".")) continue;
       const full = path.join(dir, e.name);
       if (e.isDirectory()) await walk(full);
       else if (e.isFile()) n++;
