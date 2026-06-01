@@ -179,15 +179,20 @@ install_texlive() {
       ubuntu|debian)
         case "$TEXLIVE_PROFILE" in
           minimal)     pkg_install texlive-latex-base texlive-latex-recommended ;;
-          recommended) pkg_install texlive-latex-base texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended texlive-xetex texlive-luatex ;;
+          # texlive-publishers ships journal/conference classes that authors
+          # almost always need: elsarticle (Elsevier), IEEEtran (IEEE),
+          # acmart (ACM), revtex4-2 (APS/AIP) and dozens more. ~60 MB on
+          # disk, no runtime cost. Without it a "recommended" install can't
+          # compile the most common academic templates.
+          recommended) pkg_install texlive-latex-base texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended texlive-xetex texlive-luatex texlive-publishers ;;
           full)        pkg_install texlive-full ;;
         esac
         ;;
       fedora|rhel|centos|rocky|almalinux)
-        pkg_install texlive-scheme-medium texlive-xetex texlive-luatex
+        pkg_install texlive-scheme-medium texlive-xetex texlive-luatex texlive-collection-publishers
         ;;
       arch|manjaro)
-        pkg_install texlive-core texlive-latexextra texlive-fontsextra
+        pkg_install texlive-core texlive-latexextra texlive-fontsextra texlive-publishers
         ;;
     esac
   fi
