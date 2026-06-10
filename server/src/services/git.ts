@@ -190,6 +190,63 @@ async function commitProjectIfNeeded(root: string): Promise<void> {
   await runGit(root, ["commit", "-m", "Save pending project changes"]);
 }
 
+// List file paths present at a given commit. Used by the history-browse UI
+// to render the file tree at a past state without touching the working tree.
+export async function listFilesAtCommit(root: string, hash: string): Promise<string[]> {
+  await ensureGitRepo(root);
+  assertShortHash(hash);
+  const out = await runGit(root, ["ls-tree", "-r", "--name-only", hash]);
+  return out.split("\n").filter(Boolean);
+}
+
+// Read a single file's content at a given commit. Caller must already have
+// validated reader access to the project. relPath is matched against the
+// commit's tree, so a request for a path outside the repo just yields the
+// "exists on disk?" error path.
+export async function readFileAtCommit(root: string, hash: string, relPath: string): Promise<string> {
+  await ensureGitRepo(root);
+  assertShortHash(hash);
+  if (relPath.includes("\0") || relPath.startsWith("/") || relPath.includes("..")) {
+    throw new Error("invalid path");
+  }
+  // `git show <hash>:<path>` reads the blob from the commit's tree without
+  // touching the working tree. Pipes through execFile so binary content is
+  // fine — base64 happens at the route layer if needed.
+  return runGit(root, ["show", `${hash}:${relPath}`]);
+}
+
+// Reset working tree + index + HEAD to a past commit. Tags the prior HEAD
+// as pre-revert-<unix-ts> so it's recoverable even after this lands. Does
+// NOT touch in-memory Yjs rooms or sidecars — caller (route layer) is
+// responsible for evicting them before calling this, otherwise live CRDTs
+// will overwrite the reset.
+export async function revertToCommit(
+  root: string,
+  hash: string,
+  actor: UserRow,
+): Promise<{ newHead: string; safetyTag: string }> {
+  await ensureGitRepo(root);
+  assertShortHash(hash);
+  // Resolve to a full hash so the tag points at the same commit even if
+  // someone passes a 7-char prefix.
+  const fullHead = (await runGit(root, ["rev-parse", "HEAD"])).trim();
+  const fullTarget = (await runGit(root, ["rev-parse", hash])).trim();
+  // Naming: include actor + epoch so multiple reverts in a row don't clash.
+  const ts = Math.floor(Date.now() / 1000);
+  const safe = (actor.username || `user-${actor.id}`).replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const safetyTag = `pre-revert-${safe}-${ts}`;
+  await runGit(root, ["tag", "-f", safetyTag, fullHead]);
+  await runGit(root, ["reset", "--hard", fullTarget]);
+  return { newHead: fullTarget, safetyTag };
+}
+
+function assertShortHash(hash: string): void {
+  // git accepts shortened hashes; we don't try to enforce a length, but we
+  // do reject anything that isn't [0-9a-f] so a hostile caller can't smuggle
+  // shell metacharacters or ref expressions (HEAD~3, branch names, etc) in.
+  if (!/^[0-9a-f]{4,64}$/.test(hash)) throw new Error("invalid commit hash");
+}
+
 export async function runGit(root: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, {
     cwd: root,

@@ -78,11 +78,28 @@ export interface RealtimeService {
   // Used by the compile flow to materialise the latest in-memory text to
   // disk before pdflatex sees it. No-op if no room exists.
   flushBeforeCompile(filePath: string): Promise<void>;
+  // Tear down every room for a project and delete its CRDT sidecars.
+  // Used by the revert flow so the in-memory CRDT doesn't re-stamp the
+  // pre-revert content over the freshly-reset working tree. Disconnects
+  // all attached clients so they reconnect into a fresh room hydrated
+  // from disk. Returns the number of rooms destroyed and sidecars removed.
+  evictProject(projectId: number): { rooms: number; sidecars: number };
   // Inspect: how many rooms are live (admin diagnostics).
   status(): { rooms: number; clients: number };
 }
 
 const keyOf = (k: RoomKey) => `${k.projectId}:${k.relPath}`;
+
+function walkFiles(dir: string, visit: (abs: string) => void): void {
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (e.name.startsWith(".")) continue;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) walkFiles(full, visit);
+    else if (e.isFile()) visit(full);
+  }
+}
 
 export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   const rooms = new Map<string, Room>();
@@ -339,6 +356,61 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     }
   }
 
+  function evictProject(projectId: number): { rooms: number; sidecars: number } {
+    let rooms_evicted = 0;
+    let sidecars_removed = 0;
+    const prefix = `${projectId}:`;
+    const victims: Room[] = [];
+    for (const room of rooms.values()) {
+      if (room.key.startsWith(prefix)) victims.push(room);
+    }
+    for (const room of victims) {
+      // Cancel any pending grace-destroy timer so we don't double-fire.
+      if (room.graceTimer) { clearTimeout(room.graceTimer); room.graceTimer = null; }
+      if (room.saveTimer) { clearTimeout(room.saveTimer); room.saveTimer = null; }
+      // Close any attached sockets so clients reconnect into the fresh room.
+      for (const ws of room.clients) {
+        try { ws.close(4000, "project reverted"); } catch { /* already closed */ }
+      }
+      // Drop the sidecar so the next open hydrates from disk (= the new
+      // post-revert content), not from the pre-revert CRDT state.
+      try {
+        fs.unlinkSync(room.sidecarPath);
+        sidecars_removed++;
+      } catch { /* may not exist yet */ }
+      destroyRoom(room);
+      rooms_evicted++;
+    }
+    // Also scan the on-disk sidecar dir for any other paths that belonged to
+    // this project but had no live room. We can't reverse the sha256, so we
+    // enumerate every file currently on disk under <dataDir>/projects/*/<id>/
+    // and delete the sidecars whose hashes match those paths.
+    try {
+      // Owner ID is encoded in the room key when available, but we may have
+      // no live rooms left for the project (orphan sidecars from prior
+      // sessions). Walk the projects tree for all owners and find the
+      // <id>/<projectId> directory.
+      const projectsRoot = path.join(cfg.dataDir, "projects");
+      for (const ownerDir of fs.readdirSync(projectsRoot, { withFileTypes: true })) {
+        if (!ownerDir.isDirectory()) continue;
+        const projectDir = path.join(projectsRoot, ownerDir.name, String(projectId));
+        if (!fs.existsSync(projectDir)) continue;
+        walkFiles(projectDir, (abs) => {
+          const side = sidecarPathFor(cfg, abs);
+          try {
+            fs.unlinkSync(side);
+            sidecars_removed++;
+          } catch { /* no sidecar for this path */ }
+        });
+        break;
+      }
+    } catch (err) {
+      rootLog.warn("evictProject: orphan-sidecar sweep failed", { err, projectId });
+    }
+    rootLog.info("realtime: project evicted", { projectId, rooms: rooms_evicted, sidecars: sidecars_removed });
+    return { rooms: rooms_evicted, sidecars: sidecars_removed };
+  }
+
   async function flushBeforeCompile(filePath: string): Promise<void> {
     // Find any room that backs this file and flush it. Lookup is by absolute
     // path since the room key is project-scoped while the compile flow knows
@@ -358,7 +430,7 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   }
 
   rootLog.info("realtime: service ready");
-  return { handleConnection, flushBeforeCompile, status };
+  return { handleConnection, flushBeforeCompile, evictProject, status };
 }
 
 // Module-level singleton so the compile flow can call flushBeforeCompile()

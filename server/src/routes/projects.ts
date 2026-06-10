@@ -13,10 +13,14 @@ import {
   diffProposal,
   diffProposalPatch,
   ensureGitRepo,
+  listFilesAtCommit,
   listHistory,
   mergeProposal,
+  readFileAtCommit,
   removeProposalWorktree,
+  revertToCommit,
 } from "../services/git";
+import { getRealtime } from "../services/realtime";
 import { ensureProjectDir, projectDir, resolveSafe, slugify, STARTER_TEX, FsBoundaryError } from "../services/projects";
 import { makePresence } from "../services/presence";
 
@@ -144,6 +148,60 @@ export function projectsRouter(cfg: Config, db: Db) {
     if (!p) return;
     const root = await ensureProjectDir(cfg, p.owner_id, p.id);
     res.json({ history: await listHistory(root) });
+  });
+
+  // Browse a past commit (read-only). Reader access is enough — viewing
+  // history doesn't change anything, and the same content was visible
+  // when that commit was HEAD.
+  r.get("/:id/history/:hash/files", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    const root = await ensureProjectDir(cfg, p.owner_id, p.id);
+    try {
+      const files = await listFilesAtCommit(root, req.params.hash);
+      res.json({ files });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  r.get("/:id/history/:hash/file", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    const rel = typeof req.query.path === "string" ? req.query.path : "";
+    if (!rel) return res.status(400).json({ error: "path required" });
+    const root = await ensureProjectDir(cfg, p.owner_id, p.id);
+    try {
+      const content = await readFileAtCommit(root, req.params.hash, rel);
+      res.json({ content });
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  // Owner-only: rewind the working tree to a past commit. Auto-creates a
+  // safety tag, evicts in-memory CRDT rooms for the project (otherwise
+  // the live Yjs state would overwrite the reset on the next save), and
+  // closes all attached WS clients so they reconnect into fresh rooms.
+  r.post("/:id/history/:hash/revert", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "owner", res);
+    if (!p) return;
+    const root = await ensureProjectDir(cfg, p.owner_id, p.id);
+    const rt = getRealtime();
+    const evicted = rt ? rt.evictProject(p.id) : { rooms: 0, sidecars: 0 };
+    try {
+      const result = await revertToCommit(root, req.params.hash, u);
+      db.log.info("project reverted", {
+        projectId: p.id, actor: u.username, target: result.newHead,
+        safetyTag: result.safetyTag, ...evicted,
+      });
+      res.json({ ok: true, ...result, evicted });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
   });
 
   // Presence: who else is looking at this project right now.

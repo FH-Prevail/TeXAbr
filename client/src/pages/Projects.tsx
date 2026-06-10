@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, type GitCommit, type GitDiffFile, type Project, type ProjectMember, type ProjectProposal, type QuotaSnapshot } from "../api/client";
 import { useAuth } from "../api/auth-context";
@@ -392,20 +392,158 @@ function ProjectDetails({
         {history.length === 0 ? (
           <p className="muted">No committed changes yet.</p>
         ) : (
-          <table className="simple compact">
-            <tbody>
-              {history.map((c) => (
-                <tr key={c.hash}>
-                  <td className="mono">{c.shortHash}</td>
-                  <td>{c.subject}</td>
-                  <td>{c.author}</td>
-                  <td>{new Date(c.timestamp).toLocaleString()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <CommitHistory project={project} history={history} />
         )}
       </div>
     </section>
+  );
+}
+
+// Browse a commit (any reader+) and, for owners, revert the project to it.
+// Clicking a row expands an inline panel with that commit's file tree;
+// clicking a file shows its content. Revert tags the prior HEAD as a
+// safety net and evicts in-memory CRDT rooms so the live editor reloads
+// the post-revert files.
+function CommitHistory({ project, history }: { project: Project; history: GitCommit[] }) {
+  const [openHash, setOpenHash] = useState<string | null>(null);
+  const [files, setFiles] = useState<string[]>([]);
+  const [filesError, setFilesError] = useState("");
+  const [activeFile, setActiveFile] = useState<string | null>(null);
+  const [fileContent, setFileContent] = useState<string>("");
+  const [fileError, setFileError] = useState("");
+  const [reverting, setReverting] = useState(false);
+
+  async function toggle(c: GitCommit) {
+    if (openHash === c.hash) {
+      setOpenHash(null);
+      setFiles([]);
+      setActiveFile(null);
+      setFileContent("");
+      setFilesError("");
+      setFileError("");
+      return;
+    }
+    setOpenHash(c.hash);
+    setActiveFile(null);
+    setFileContent("");
+    setFilesError("");
+    setFileError("");
+    try {
+      const r = await api.projects.historyFiles(project.id, c.hash);
+      setFiles(r.files);
+    } catch (err) {
+      setFilesError((err as Error).message);
+      setFiles([]);
+    }
+  }
+
+  async function viewFile(hash: string, path: string) {
+    setActiveFile(path);
+    setFileError("");
+    setFileContent("");
+    try {
+      const r = await api.projects.historyFile(project.id, hash, path);
+      setFileContent(r.content);
+    } catch (err) {
+      setFileError((err as Error).message);
+    }
+  }
+
+  async function revert(c: GitCommit) {
+    const msg = `Revert "${project.name}" to commit ${c.shortHash}?\n\n` +
+      `"${c.subject}" by ${c.author} on ${new Date(c.timestamp).toLocaleString()}.\n\n` +
+      `Everything committed AFTER this point will be removed from the working tree. ` +
+      `The previous state is preserved as a "pre-revert" tag in git, so this is recoverable.`;
+    if (!confirm(msg)) return;
+    setReverting(true);
+    try {
+      const r = await api.projects.revertToCommit(project.id, c.hash);
+      alert(`Reverted. Safety tag: ${r.safetyTag}\nEvicted ${r.evicted.rooms} live editor sessions; reloading.`);
+      window.location.reload();
+    } catch (err) {
+      alert(`Revert failed: ${(err as Error).message}`);
+      setReverting(false);
+    }
+  }
+
+  return (
+    <table className="simple compact">
+      <tbody>
+        {history.map((c) => (
+          <React.Fragment key={c.hash}>
+            <tr
+              onClick={() => toggle(c)}
+              style={{ cursor: "pointer", background: openHash === c.hash ? "rgba(70,130,255,0.08)" : undefined }}
+              title="Click to preview files at this commit"
+            >
+              <td className="mono">{c.shortHash}</td>
+              <td>{c.subject}</td>
+              <td>{c.author}</td>
+              <td>{new Date(c.timestamp).toLocaleString()}</td>
+            </tr>
+            {openHash === c.hash && (
+              <tr>
+                <td colSpan={4} style={{ padding: 12, background: "rgba(0,0,0,0.03)" }}>
+                  {filesError && <p className="error">{filesError}</p>}
+                  <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                    <div style={{ minWidth: 220, maxHeight: 360, overflow: "auto", borderRight: "1px solid rgba(0,0,0,0.08)", paddingRight: 12 }}>
+                      <strong style={{ fontSize: 12 }}>Files at {c.shortHash}</strong>
+                      {files.length === 0 && !filesError && <p className="muted" style={{ fontSize: 12 }}>(empty tree)</p>}
+                      <ul style={{ listStyle: "none", padding: 0, margin: "6px 0 0" }}>
+                        {files.map((f) => (
+                          <li key={f}>
+                            <button
+                              onClick={() => viewFile(c.hash, f)}
+                              className="mono"
+                              style={{
+                                background: activeFile === f ? "rgba(70,130,255,0.18)" : "transparent",
+                                border: "none", padding: "2px 6px", cursor: "pointer",
+                                fontSize: 12, textAlign: "left", width: "100%",
+                              }}
+                              title={f}
+                            >
+                              {f}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      {project.access_role === "owner" && (
+                        <button
+                          className="primary"
+                          disabled={reverting}
+                          onClick={() => revert(c)}
+                          style={{ marginBottom: 8 }}
+                        >
+                          {reverting ? "Reverting…" : `Revert project to ${c.shortHash}`}
+                        </button>
+                      )}
+                      {activeFile ? (
+                        <>
+                          <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+                            <span className="mono">{activeFile}</span> at <span className="mono">{c.shortHash}</span>
+                          </div>
+                          {fileError ? (
+                            <p className="error">{fileError}</p>
+                          ) : (
+                            <pre style={{
+                              maxHeight: 320, overflow: "auto", background: "#0e1116", color: "#d4d4d4",
+                              padding: 10, fontSize: 12, borderRadius: 4, margin: 0,
+                            }}>{fileContent}</pre>
+                          )}
+                        </>
+                      ) : (
+                        <p className="muted" style={{ fontSize: 12 }}>Select a file on the left to preview its content at this commit (read-only).</p>
+                      )}
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            )}
+          </React.Fragment>
+        ))}
+      </tbody>
+    </table>
   );
 }

@@ -71,6 +71,13 @@ export const api = {
     unshare: (id: number, userId: number) =>
       call<{ members: ProjectMember[] }>("DELETE", `/api/projects/${id}/shares/${userId}`),
     history: (id: number) => call<{ history: GitCommit[] }>("GET", `/api/projects/${id}/history`),
+    historyFiles: (id: number, hash: string) =>
+      call<{ files: string[] }>("GET", `/api/projects/${id}/history/${hash}/files`),
+    historyFile: (id: number, hash: string, path: string) =>
+      call<{ content: string }>("GET", `/api/projects/${id}/history/${hash}/file?path=${encodeURIComponent(path)}`),
+    revertToCommit: (id: number, hash: string) =>
+      call<{ ok: true; newHead: string; safetyTag: string; evicted: { rooms: number; sidecars: number } }>(
+        "POST", `/api/projects/${id}/history/${hash}/revert`),
     presence: (id: number) => call<{ users: PresenceUser[] }>("GET", `/api/projects/${id}/presence`),
     heartbeat: (id: number) => call<{ ok: true }>("POST", `/api/projects/${id}/presence`),
     getState:  (id: number) => call<{ state: ProjectUiState | null }>("GET", `/api/projects/${id}/state`),
