@@ -1846,6 +1846,8 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
                                 latexEngine={latexEngine}
                                 onMissingPackages={handleMissingPackages}
                                 onSyncTexJump={handleSyncTexJump}
+                                projectId={projectId ? Number(projectId) : null}
+                                canRevert={projectInfo?.access_role === 'editor' || projectInfo?.access_role === 'owner'}
                             />
                         </div>
                         <div className="structure-layer" hidden={!showStructureMap} style={{ height: '100%' }}>

@@ -171,3 +171,37 @@
 
 
 
+
+.preview-last-good {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  margin: 6px 0 10px;
+  border: 1px solid rgba(70, 130, 255, 0.45);
+  border-left: 3px solid rgba(70, 130, 255, 0.85);
+  background: rgba(70, 130, 255, 0.07);
+  border-radius: 4px;
+  font-size: 12px;
+}
+.preview-last-good-text { flex: 1; min-width: 0; }
+.preview-last-good-btn {
+  background: rgba(70, 130, 255, 0.85);
+  color: white;
+  border: none;
+  padding: 5px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.preview-last-good-btn:hover:not(:disabled) {
+  background: rgba(60, 115, 230, 1);
+}
+.preview-last-good-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

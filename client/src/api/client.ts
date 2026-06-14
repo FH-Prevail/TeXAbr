@@ -78,6 +78,12 @@ export const api = {
     revertToCommit: (id: number, hash: string) =>
       call<{ ok: true; newHead: string; safetyTag: string; evicted: { rooms: number; sidecars: number } }>(
         "POST", `/api/projects/${id}/history/${hash}/revert`),
+    lastGoodCompile: (id: number) =>
+      call<{ lastGood: { hash: string; shortHash: string; author: string; timestamp: number; subject: string; isCurrentHead: boolean } | null }>(
+        "GET", `/api/projects/${id}/last-good-compile`),
+    revertToLastGoodCompile: (id: number) =>
+      call<{ ok: true; newHead: string; safetyTag: string; evicted: { rooms: number; sidecars: number }; target: { shortHash: string; timestamp: number; author: string } }>(
+        "POST", `/api/projects/${id}/last-good-compile/revert`),
     presence: (id: number) => call<{ users: PresenceUser[] }>("GET", `/api/projects/${id}/presence`),
     heartbeat: (id: number) => call<{ ok: true }>("POST", `/api/projects/${id}/presence`),
     getState:  (id: number) => call<{ state: ProjectUiState | null }>("GET", `/api/projects/${id}/state`),

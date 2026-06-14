@@ -13,6 +13,8 @@ import {
   diffProposal,
   diffProposalPatch,
   ensureGitRepo,
+  getLastGoodCompile,
+  lastGoodCompileTagName,
   listFilesAtCommit,
   listHistory,
   mergeProposal,
@@ -178,6 +180,45 @@ export function projectsRouter(cfg: Config, db: Db) {
       res.json({ content });
     } catch (err) {
       res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  // "Last good compile" snapshot: tag refreshed by services/latex.ts on every
+  // successful compile. Editor+ can read and revert to it. Lower-friction
+  // than the owner-only history revert above: a bad save is a normal
+  // editing accident, and recovering shouldn't require pinging the owner.
+  r.get("/:id/last-good-compile", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    const root = await ensureProjectDir(cfg, p.owner_id, p.id);
+    const info = await getLastGoodCompile(root);
+    res.json({ lastGood: info });
+  });
+
+  r.post("/:id/last-good-compile/revert", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "editor", res);
+    if (!p) return;
+    const root = await ensureProjectDir(cfg, p.owner_id, p.id);
+    const info = await getLastGoodCompile(root);
+    if (!info) {
+      return res.status(404).json({ error: "no good compile recorded yet" });
+    }
+    if (info.isCurrentHead) {
+      return res.status(409).json({ error: "already at last good compile" });
+    }
+    const rt = getRealtime();
+    const evicted = rt ? rt.evictProject(p.id) : { rooms: 0, sidecars: 0 };
+    try {
+      const result = await revertToCommit(root, info.hash, u);
+      db.log.info("revert to last good compile", {
+        projectId: p.id, actor: u.username, target: result.newHead,
+        safetyTag: result.safetyTag, lastGoodTag: lastGoodCompileTagName(), ...evicted,
+      });
+      res.json({ ok: true, ...result, evicted, target: info });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
     }
   });
 

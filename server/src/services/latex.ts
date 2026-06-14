@@ -7,6 +7,7 @@ import { detectSandbox, spawnSandboxed } from "./sandbox";
 import { makeCompileQueue, type CompileQueue } from "./compileQueue";
 import { trackProc, untrackProc } from "./shutdown";
 import { getRealtime } from "./realtime";
+import { tagLastGoodCompile } from "./git";
 
 export interface CompileResult {
   ok: boolean;
@@ -170,6 +171,18 @@ export async function compile(
       durationMs: Date.now() - started,
       sandboxed: sandboxOn,
     };
+
+    // Refresh the last-good-compile tag so the "Revert to last good"
+    // button always has a known-clean fallback. Tagging is cheap — no
+    // checkpoint commit needed; we just move the tag onto the current HEAD,
+    // which is whatever the autosave layer has already committed.
+    // Failure to tag is non-fatal: a missed tag just means the next good
+    // compile will move it forward.
+    if (result.ok) {
+      tagLastGoodCompile(projectRoot).catch((err) => {
+        db.log.warn("tagLastGoodCompile failed", { err, projectId: opts.projectId });
+      });
+    }
 
     db.audit.record({
       event: "compile.finish",

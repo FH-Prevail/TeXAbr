@@ -7,6 +7,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 // replaces Openotex's webpack-copy approach.
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.js?url';
 import NotificationDialog from './NotificationDialog';
+import { api } from '../api/client';
 import type { LatexDiagnostic } from '../shared/latexDiagnostics';
 import '../styles/Preview.css';
 import '../styles/Preview-addon.css';
@@ -27,6 +28,11 @@ interface PreviewProps {
   latexEngine?: 'pdflatex' | 'xelatex' | 'lualatex';
   onMissingPackages?: (packages: string[]) => void;
   onSyncTexJump?: (target: { file: string; line: number; column: number }) => void;
+  // For the "Revert to last good compile" button shown in the error panel.
+  // projectId can be null when not in a server project (no recovery possible).
+  // canRevert mirrors the editor/owner check from the project access role.
+  projectId?: number | null;
+  canRevert?: boolean;
 }
 
 const Preview = forwardRef<PreviewHandle, PreviewProps>(({
@@ -37,6 +43,8 @@ const Preview = forwardRef<PreviewHandle, PreviewProps>(({
   latexEngine = 'pdflatex',
   onMissingPackages,
   onSyncTexJump,
+  projectId = null,
+  canRevert = false,
 }, ref) => {
   const [pdfData, setPdfData] = useState<string>('');
   const [pdfPath, setPdfPath] = useState<string>('');
@@ -45,6 +53,11 @@ const Preview = forwardRef<PreviewHandle, PreviewProps>(({
   const [error, setError] = useState<string>('');
   const [compilationLog, setCompilationLog] = useState<string>('');
   const [diagnostics, setDiagnostics] = useState<LatexDiagnostic[]>([]);
+  // Last successful compile's commit, fetched whenever the current compile
+  // fails so the error panel can offer a 1-click revert. null = no good
+  // compile recorded yet (= revert button hidden).
+  const [lastGood, setLastGood] = useState<{ shortHash: string; author: string; timestamp: number; subject: string; isCurrentHead: boolean } | null>(null);
+  const [reverting, setReverting] = useState(false);
   const [zoom, setZoom] = useState(100);
   const [latexInstalled, setLatexInstalled] = useState<boolean | null>(null);
   const [latexVersion, setLatexVersion] = useState<string>('');
@@ -64,6 +77,44 @@ const Preview = forwardRef<PreviewHandle, PreviewProps>(({
     () => (currentFileExtension ? currentFileExtension.toLowerCase() : ''),
     [currentFileExtension]
   );
+
+  // Pull the last-good-compile pointer whenever the current compile fails.
+  // We don't fetch it on success: nothing to recover from then, and a
+  // successful compile is what just refreshed the tag anyway.
+  useEffect(() => {
+    if (!error || !projectId || !canRevert) { setLastGood(null); return; }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await api.projects.lastGoodCompile(projectId);
+        if (!cancelled) setLastGood(r.lastGood);
+      } catch {
+        if (!cancelled) setLastGood(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [error, projectId, canRevert]);
+
+  const handleRevertToLastGood = useCallback(async () => {
+    if (!projectId || !lastGood) return;
+    const ts = new Date(lastGood.timestamp).toLocaleString();
+    const ok = confirm(
+      `Revert the project to the last successful compile?\n\n` +
+      `Target: ${lastGood.shortHash} by ${lastGood.author} (${ts})\n\n` +
+      `Anything edited since then will be removed from the working tree. ` +
+      `The current state is preserved as a "pre-revert" tag in git, so this is recoverable.`,
+    );
+    if (!ok) return;
+    setReverting(true);
+    try {
+      const r = await api.projects.revertToLastGoodCompile(projectId);
+      alert(`Reverted. Safety tag: ${r.safetyTag}\nClosing ${r.evicted.rooms} live editor sessions; reloading.`);
+      window.location.reload();
+    } catch (err) {
+      alert(`Revert failed: ${(err as Error).message}`);
+      setReverting(false);
+    }
+  }, [projectId, lastGood]);
   const isLatexFile = fileExtension === 'tex' || fileExtension === 'latex';
   const isMarkdownFile = fileExtension === 'md' || fileExtension === 'markdown';
   const engineSuggestion = useMemo(() => {
@@ -610,6 +661,25 @@ const Preview = forwardRef<PreviewHandle, PreviewProps>(({
       {error && (
         <div className="preview-error">
           <h4>Compilation Error</h4>
+          {lastGood && !lastGood.isCurrentHead && (
+            <div className="preview-last-good">
+              <div className="preview-last-good-text">
+                <strong>Last successful compile:</strong>{' '}
+                <span className="mono">{lastGood.shortHash}</span> by {lastGood.author}
+                {' · '}
+                {new Date(lastGood.timestamp).toLocaleString()}
+              </div>
+              <button
+                type="button"
+                className="preview-last-good-btn"
+                onClick={handleRevertToLastGood}
+                disabled={reverting}
+                title="Reset every file to its state at the last successful compile. Recoverable via a safety tag in git."
+              >
+                {reverting ? 'Reverting…' : 'Revert to last good compile'}
+              </button>
+            </div>
+          )}
           <pre>{error}</pre>
           {diagnostics.length > 0 && (
             <div className="preview-diagnostics">

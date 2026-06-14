@@ -240,6 +240,47 @@ export async function revertToCommit(
   return { newHead: fullTarget, safetyTag };
 }
 
+// "Last good compile" tag: refreshed on every successful pdflatex run so the
+// project always has a known-good fallback to revert to. Editors (not just
+// owners) can roll back to this — recovering from a bad save is a normal
+// editing accident, not a destructive admin action.
+const LAST_GOOD_TAG = "last-good-compile";
+
+export async function tagLastGoodCompile(root: string): Promise<void> {
+  await ensureGitRepo(root);
+  // No commits yet → nothing to point the tag at. Treat as success.
+  try { await runGit(root, ["rev-parse", "HEAD"]); }
+  catch { return; }
+  await runGit(root, ["tag", "-f", LAST_GOOD_TAG, "HEAD"]);
+}
+
+export async function getLastGoodCompile(root: string): Promise<{
+  hash: string; shortHash: string; author: string; timestamp: number; subject: string; isCurrentHead: boolean;
+} | null> {
+  await ensureGitRepo(root);
+  let tagHash = "";
+  try {
+    tagHash = (await runGit(root, ["rev-parse", LAST_GOOD_TAG])).trim();
+  } catch {
+    return null;
+  }
+  if (!tagHash) return null;
+  const headHash = (await runGit(root, ["rev-parse", "HEAD"]).catch(() => "")).trim();
+  const out = await runGit(root, [
+    "log", "-1", tagHash,
+    "--pretty=format:%H%x1f%h%x1f%an%x1f%ct%x1f%s",
+  ]);
+  const [hash, shortHash, author, ts, subject] = out.split("\x1f");
+  return {
+    hash, shortHash, author,
+    timestamp: Number(ts) * 1000,
+    subject,
+    isCurrentHead: hash === headHash,
+  };
+}
+
+export function lastGoodCompileTagName(): string { return LAST_GOOD_TAG; }
+
 function assertShortHash(hash: string): void {
   // git accepts shortened hashes; we don't try to enforce a length, but we
   // do reject anything that isn't [0-9a-f] so a hostile caller can't smuggle
