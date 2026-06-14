@@ -1296,7 +1296,7 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
                     }
                     triggerCompile();
                 })();
-            }, 3000); // Compile after 3 seconds of inactivity
+            }, 1000); // Compile after 1 second of inactivity (was 3s — felt sluggish)
         }
     };
     const handleCompile = useCallback(async () => {
