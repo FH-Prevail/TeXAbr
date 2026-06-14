@@ -246,9 +246,27 @@ export async function revertToCommit(
 // editing accident, not a destructive admin action.
 const LAST_GOOD_TAG = "last-good-compile";
 
-export async function tagLastGoodCompile(root: string): Promise<void> {
+export async function tagLastGoodCompile(root: string, actor: UserRow): Promise<void> {
   await ensureGitRepo(root);
-  // No commits yet → nothing to point the tag at. Treat as success.
+  // Critical: commit anything Yjs flushed to disk before tagging. Without
+  // this, HEAD can lag behind the actual on-disk state that pdflatex just
+  // compiled, and the tag points at a *different* version than the one
+  // that built cleanly — so "Revert to last good" produces a state that
+  // doesn't actually compile. Yjs writes files but does NOT commit (that
+  // happens via routes/files.ts on HTTP save, which the realtime path
+  // skips). So we commit here, with the actor as the author, then tag.
+  const status = await runGit(root, ["status", "--porcelain"]);
+  if (status.trim()) {
+    const safeName = actor.username || `user-${actor.id}`;
+    const email = actor.email || `${safeName.replace(/[^a-zA-Z0-9_.-]/g, "_")}@texabr.local`;
+    await runGit(root, ["add", "-A", "--", "."]);
+    await runGit(root, [
+      "-c", `user.name=${safeName}`,
+      "-c", `user.email=${email}`,
+      "commit", "-m", "Auto-checkpoint: last good compile",
+    ]);
+  }
+  // No commits at all → nothing to point the tag at. Treat as success.
   try { await runGit(root, ["rev-parse", "HEAD"]); }
   catch { return; }
   await runGit(root, ["tag", "-f", LAST_GOOD_TAG, "HEAD"]);

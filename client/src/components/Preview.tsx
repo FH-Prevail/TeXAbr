@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback, forwardRef, useImperativeHandle } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { FiRefreshCw, FiZoomIn, FiZoomOut, FiDownload, FiAlertCircle, FiHelpCircle } from 'react-icons/fi';
+import { FiRefreshCw, FiZoomIn, FiZoomOut, FiDownload, FiAlertCircle, FiHelpCircle, FiRotateCcw } from 'react-icons/fi';
 import * as pdfjsLib from 'pdfjs-dist';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 // Vite resolves this `?url` import to a hashed asset URL at build time, which
@@ -78,11 +78,16 @@ const Preview = forwardRef<PreviewHandle, PreviewProps>(({
     [currentFileExtension]
   );
 
-  // Pull the last-good-compile pointer whenever the current compile fails.
-  // We don't fetch it on success: nothing to recover from then, and a
-  // successful compile is what just refreshed the tag anyway.
+  // Re-fetch the last-good-compile pointer on every compile attempt
+  // (compileNonce bumps each time a compile is requested) and on initial
+  // mount. Earlier we only fetched when `error` changed — which missed
+  // two cases: (a) two consecutive failures with the same error string
+  // didn't re-fire the effect, so the user had to switch files to nudge
+  // it; (b) after a successful compile we never re-checked, so the
+  // banner could stay stale. Refetching per-compile-nonce always shows
+  // the current truth.
   useEffect(() => {
-    if (!error || !projectId || !canRevert) { setLastGood(null); return; }
+    if (!projectId || !canRevert) { setLastGood(null); return; }
     let cancelled = false;
     void (async () => {
       try {
@@ -93,7 +98,7 @@ const Preview = forwardRef<PreviewHandle, PreviewProps>(({
       }
     })();
     return () => { cancelled = true; };
-  }, [error, projectId, canRevert]);
+  }, [compileNonce, projectId, canRevert]);
 
   const handleRevertToLastGood = useCallback(async () => {
     if (!projectId || !lastGood) return;
@@ -641,6 +646,24 @@ const Preview = forwardRef<PreviewHandle, PreviewProps>(({
           <button type="button" title="Export PDF" onClick={handleExportPDF}>
             <FiDownload size={16} />
           </button>
+          {/* Always-visible revert button (when canRevert). Shows a green dot
+              if the project is already at the last-good state, a blue dot
+              if there's a known-good state to revert TO, and is hidden if
+              no good compile has ever been recorded. */}
+          {canRevert && lastGood && (
+            <button
+              type="button"
+              className={`preview-revert-btn ${lastGood.isCurrentHead ? 'is-current' : 'has-target'}`}
+              onClick={handleRevertToLastGood}
+              disabled={reverting || lastGood.isCurrentHead}
+              title={lastGood.isCurrentHead
+                ? `Already at last good compile (${lastGood.shortHash} by ${lastGood.author}, ${new Date(lastGood.timestamp).toLocaleString()})`
+                : `Revert project to last good compile: ${lastGood.shortHash} by ${lastGood.author}, ${new Date(lastGood.timestamp).toLocaleString()}`}
+            >
+              <FiRotateCcw size={16} />
+              <span className="preview-revert-dot" />
+            </button>
+          )}
         </div>
       </div>
       {engineSuggestion && (

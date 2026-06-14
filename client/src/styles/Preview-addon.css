@@ -213,3 +213,18 @@
   color: rgba(180, 180, 180, 1);
   font-style: italic;
 }
+
+.preview-revert-btn {
+  position: relative;
+}
+.preview-revert-btn .preview-revert-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.preview-revert-btn.has-target .preview-revert-dot { background: rgba(70, 130, 255, 0.95); }
+.preview-revert-btn.is-current .preview-revert-dot { background: rgba(80, 180, 90, 0.85); }

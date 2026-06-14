@@ -173,15 +173,19 @@ export async function compile(
     };
 
     // Refresh the last-good-compile tag so the "Revert to last good"
-    // button always has a known-clean fallback. Tagging is cheap — no
-    // checkpoint commit needed; we just move the tag onto the current HEAD,
-    // which is whatever the autosave layer has already committed.
-    // Failure to tag is non-fatal: a missed tag just means the next good
-    // compile will move it forward.
+    // button always has a known-clean fallback. tagLastGoodCompile
+    // commits any uncommitted on-disk state (Yjs writes files but does
+    // NOT commit), then moves the tag onto the resulting HEAD. Without
+    // the pre-commit, HEAD could lag behind what was actually compiled
+    // and the tag would point at the wrong content.
+    // Failure to tag is non-fatal: the next good compile will move it.
     if (result.ok) {
-      tagLastGoodCompile(projectRoot).catch((err) => {
-        db.log.warn("tagLastGoodCompile failed", { err, projectId: opts.projectId });
-      });
+      const actor = db.users.findById(opts.userId);
+      if (actor) {
+        tagLastGoodCompile(projectRoot, actor).catch((err) => {
+          db.log.warn("tagLastGoodCompile failed", { err, projectId: opts.projectId });
+        });
+      }
     }
 
     db.audit.record({
