@@ -661,24 +661,33 @@ const Preview = forwardRef<PreviewHandle, PreviewProps>(({
       {error && (
         <div className="preview-error">
           <h4>Compilation Error</h4>
-          {lastGood && !lastGood.isCurrentHead && (
-            <div className="preview-last-good">
-              <div className="preview-last-good-text">
-                <strong>Last successful compile:</strong>{' '}
-                <span className="mono">{lastGood.shortHash}</span> by {lastGood.author}
-                {' · '}
-                {new Date(lastGood.timestamp).toLocaleString()}
-              </div>
-              <button
-                type="button"
-                className="preview-last-good-btn"
-                onClick={handleRevertToLastGood}
-                disabled={reverting}
-                title="Reset every file to its state at the last successful compile. Recoverable via a safety tag in git."
-              >
-                {reverting ? 'Reverting…' : 'Revert to last good compile'}
-              </button>
-            </div>
+          {canRevert && projectId && (lastGood
+            ? !lastGood.isCurrentHead && (
+                <div className="preview-last-good">
+                  <div className="preview-last-good-text">
+                    <strong>Last successful compile:</strong>{' '}
+                    <span className="mono">{lastGood.shortHash}</span> by {lastGood.author}
+                    {' · '}
+                    {new Date(lastGood.timestamp).toLocaleString()}
+                  </div>
+                  <button
+                    type="button"
+                    className="preview-last-good-btn"
+                    onClick={handleRevertToLastGood}
+                    disabled={reverting}
+                    title="Reset every file to its state at the last successful compile. Recoverable via a safety tag in git."
+                  >
+                    {reverting ? 'Reverting…' : 'Revert to last good compile'}
+                  </button>
+                </div>
+              )
+            : (
+                <div className="preview-last-good preview-last-good-empty">
+                  <div className="preview-last-good-text">
+                    No successful compile recorded yet — once this project builds once, a one-click revert to that state will appear here.
+                  </div>
+                </div>
+              )
           )}
           <pre>{error}</pre>
           {diagnostics.length > 0 && (

@@ -205,3 +205,11 @@
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+.preview-last-good-empty {
+  border-color: rgba(150, 150, 150, 0.35);
+  border-left-color: rgba(150, 150, 150, 0.7);
+  background: rgba(150, 150, 150, 0.05);
+  color: rgba(180, 180, 180, 1);
+  font-style: italic;
+}
