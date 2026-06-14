@@ -65,6 +65,22 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
     };
     provider.on("status", onStatus);
 
+    // When the server force-closes the WS with code 4000 ("project
+    // reverted"), the local Y.Doc still holds the pre-revert content. If
+    // we just let y-websocket reconnect, it'll re-stamp that stale state
+    // onto the freshly-reset server doc on the next sync — the exact
+    // failure mode that kept re-breaking Echo-Paper.
+    // Reloading the page destroys this tab's Y.Doc and forces a fresh
+    // hydration from the server's disk content, which IS the recovered
+    // version. The reverter alert already warned the user a reload is
+    // coming, but this handles every other client (Taha) too.
+    const onClose = (event: CloseEvent | null) => {
+      if (event?.code === 4000) {
+        window.location.reload();
+      }
+    };
+    provider.on("connection-close", onClose);
+
     // Backgrounded tabs in Chrome throttle timers and WS heartbeats, which
     // makes y-websocket's reconnect loop flap repeatedly. Each flap fires a
     // status event and re-renders, and historically also leaked binding
@@ -82,6 +98,7 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
       provider.off("status", onStatus);
+      provider.off("connection-close", onClose);
       try { provider.disconnect(); } catch { /* already disconnected */ }
       try { provider.destroy(); } catch { /* already destroyed */ }
       try { ydoc.destroy(); } catch { /* already destroyed */ }
