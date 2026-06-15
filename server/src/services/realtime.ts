@@ -476,9 +476,22 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   try {
     const marker = path.join(cfg.dataDir, ".evict-on-start-projects");
     const raw = fs.readFileSync(marker, "utf8");
-    const ids = raw.split(/[\s,]+/).map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
-    for (const id of ids) setLockout(id, 90_000);
-    if (ids.length) rootLog.info("realtime: post-restart lockouts applied from marker", { ids });
+    // Each token: "<projectId>" (defaults to 1h) or "<projectId>:<seconds>".
+    // 90s was too short — by the time a collaborator actually opened a tab
+    // the lockout had already expired, and their stale Y.Doc reasserted
+    // itself. 1h covers normal working-day timescales.
+    const tokens = raw.split(/[\s,]+/).filter(Boolean);
+    const applied: { id: number; durationMs: number }[] = [];
+    for (const tok of tokens) {
+      const [idStr, secStr] = tok.split(":");
+      const id = Number(idStr);
+      if (!Number.isInteger(id) || id <= 0) continue;
+      const seconds = Number(secStr);
+      const durationMs = (Number.isFinite(seconds) && seconds > 0 ? seconds : 3600) * 1000;
+      setLockout(id, durationMs);
+      applied.push({ id, durationMs });
+    }
+    if (applied.length) rootLog.info("realtime: post-restart lockouts applied from marker", { applied });
     fs.unlinkSync(marker);
   } catch { /* no marker — normal startup */ }
 
