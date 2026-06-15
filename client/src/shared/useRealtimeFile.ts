@@ -44,12 +44,25 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
     // we pass an absolute URL — we construct it explicitly.
     const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
     const serverUrl = `${wsProto}://${window.location.host}/api/projects/${projectId}/files-yjs`;
+
+    // Eviction escape-hatch: if this tab was force-reloaded by code 4000
+    // within the last 30 seconds, mark the next WS connection with
+    // ?fresh=1. The server treats this as proof that the tab already
+    // dropped its stale Y.Doc and skips the per-project lockout check —
+    // otherwise the post-deploy lockout would bounce the tab again and
+    // we'd end up in a reload loop that the browser eventually kills.
+    const evictionKey = `texabr.evicted.${projectId}.${filePath}`;
+    const evictedAtStr = sessionStorage.getItem(evictionKey);
+    const evictedAt = evictedAtStr ? Number(evictedAtStr) : 0;
+    const isFreshReload = evictedAt > 0 && Date.now() - evictedAt < 30_000;
+
     // y-websocket appends `/${roomName}` to serverUrl. We pass the file's
     // relative path as the room — the server matches anything after
     // /files-yjs/ as the file path, then resolveSafe rejects escapes.
     const provider = new WebsocketProvider(serverUrl, filePath, ydoc, {
       // Cookies are sent automatically; auth happens during the HTTP upgrade.
       connect: true,
+      params: isFreshReload ? { fresh: "1" } : {},
     });
     providerRef.current = provider;
 
@@ -65,19 +78,24 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
     };
     provider.on("status", onStatus);
 
-    // When the server force-closes the WS with code 4000 ("project
-    // reverted"), the local Y.Doc still holds the pre-revert content. If
-    // we just let y-websocket reconnect, it'll re-stamp that stale state
-    // onto the freshly-reset server doc on the next sync — the exact
-    // failure mode that kept re-breaking Echo-Paper.
-    // Reloading the page destroys this tab's Y.Doc and forces a fresh
-    // hydration from the server's disk content, which IS the recovered
-    // version. The reverter alert already warned the user a reload is
-    // coming, but this handles every other client (Taha) too.
+    // Server force-close with code 4000 ("project reset") means: drop your
+    // local Y.Doc and start over. We reload the tab so the Y.Doc dies,
+    // BUT we record the reload in sessionStorage and tag the next connect
+    // with ?fresh=1 so the server lockout check skips this tab. Without
+    // that escape-hatch we'd loop: reload -> reconnect -> server still
+    // locked -> 4000 -> reload -> ... until the browser kills the tab.
     const onClose = (event: CloseEvent | null) => {
-      if (event?.code === 4000) {
-        window.location.reload();
+      if (event?.code !== 4000) return;
+      if (isFreshReload) {
+        // Already came here via fresh=1 and STILL got bounced. Don't loop —
+        // server is misconfigured or the lockout is stuck. Surface to console
+        // and let the user retry manually.
+        sessionStorage.removeItem(evictionKey);
+        console.warn("texabr: re-evicted after fresh reconnect, not reloading");
+        return;
       }
+      sessionStorage.setItem(evictionKey, String(Date.now()));
+      window.location.reload();
     };
     provider.on("connection-close", onClose);
 

@@ -220,10 +220,17 @@ async function main() {
       return;
     }
 
+    // Eviction escape-hatch: a client that just reloaded due to a code-4000
+    // close tags its next connect with ?fresh=1. We trust this (no real
+    // attacker gains from setting it: at worst they get rejected the same
+    // way real-stale clients would be in the next eviction cycle) and pass
+    // it through so realtime.handleConnection skips the lockout check.
+    const isFreshReload = /[?&]fresh=1\b/.test(url);
+
     wss.handleUpgrade(req, socket, head, (ws) => {
       const scopedLog = log.child({ module: "yjs", user: user.username, projectId, relPath });
-      scopedLog.info("yjs: client joined");
-      realtime.handleConnection(ws, filePath, { projectId, relPath }, scopedLog);
+      scopedLog.info("yjs: client joined", { isFreshReload });
+      realtime.handleConnection(ws, filePath, { projectId, relPath }, scopedLog, { isFreshReload });
     });
   });
 

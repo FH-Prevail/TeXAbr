@@ -74,7 +74,11 @@ interface Room {
 
 export interface RealtimeService {
   // Called from the HTTP upgrade handler after auth + access checks pass.
-  handleConnection(ws: WebSocket, filePath: string, key: RoomKey, log: Logger): void;
+  // opts.isFreshReload: this connection comes from a tab that already
+  //   reloaded due to a previous code-4000 close, so the per-project
+  //   lockout check should be skipped — otherwise the tab would just get
+  //   bounced again and the user ends up in a reload loop.
+  handleConnection(ws: WebSocket, filePath: string, key: RoomKey, log: Logger, opts?: { isFreshReload?: boolean }): void;
   // Used by the compile flow to materialise the latest in-memory text to
   // disk before pdflatex sees it. No-op if no room exists.
   flushBeforeCompile(filePath: string): Promise<void>;
@@ -261,12 +265,17 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     room.log.info("realtime: room closed", { key: room.key });
   }
 
-  function handleConnection(ws: WebSocket, filePath: string, key: RoomKey, log: Logger) {
+  function handleConnection(ws: WebSocket, filePath: string, key: RoomKey, log: Logger, opts?: { isFreshReload?: boolean }) {
     // Lockout check: if the project was recently force-evicted (manual
     // disk edit, or the post-deploy startup hook), refuse the connection
     // and tell the client to reload. After reload its local Y.Doc is
     // gone and the next connect attempt sees clean state.
-    if (isLockedOut(key.projectId)) {
+    //
+    // The fresh-reload flag is the escape hatch: it tells us this tab
+    // already reloaded once due to a previous 4000 close, so its Y.Doc
+    // is already empty — bouncing it again would just cause a reload
+    // loop. Trust the flag and let the connection through.
+    if (!opts?.isFreshReload && isLockedOut(key.projectId)) {
       log.info("realtime: connection refused — project locked out", { projectId: key.projectId });
       try { ws.close(4000, "project reset — please reload"); } catch { /* already closed */ }
       return;
