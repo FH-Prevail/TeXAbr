@@ -84,6 +84,14 @@ export interface RealtimeService {
   // all attached clients so they reconnect into a fresh room hydrated
   // from disk. Returns the number of rooms destroyed and sidecars removed.
   evictProject(projectId: number): { rooms: number; sidecars: number };
+  // Lock the project out for N ms: any new WS upgrade for the project
+  // gets force-closed with code 4000 (which triggers a client-side
+  // window.location.reload via useRealtimeFile, dropping the local
+  // Y.Doc). Used together with evictProject when a server-side edit
+  // would otherwise be over-stamped by a stale client's CRDT on
+  // reconnect.
+  setLockout(projectId: number, durationMs: number): void;
+  isLockedOut(projectId: number): boolean;
   // Inspect: how many rooms are live (admin diagnostics).
   status(): { rooms: number; clients: number };
 }
@@ -103,6 +111,11 @@ function walkFiles(dir: string, visit: (abs: string) => void): void {
 
 export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   const rooms = new Map<string, Room>();
+  // Per-project lockout window: while now < lockoutUntil[pid], every
+  // incoming WS upgrade for that project gets closed with code 4000 so
+  // the client reloads with a fresh Y.Doc. Used by setLockout, checked
+  // by handleConnection.
+  const lockoutUntil = new Map<number, number>();
 
   function createRoom(key: string, filePath: string, log: Logger): Room {
     const doc = new Y.Doc();
@@ -249,6 +262,15 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   }
 
   function handleConnection(ws: WebSocket, filePath: string, key: RoomKey, log: Logger) {
+    // Lockout check: if the project was recently force-evicted (manual
+    // disk edit, or the post-deploy startup hook), refuse the connection
+    // and tell the client to reload. After reload its local Y.Doc is
+    // gone and the next connect attempt sees clean state.
+    if (isLockedOut(key.projectId)) {
+      log.info("realtime: connection refused — project locked out", { projectId: key.projectId });
+      try { ws.close(4000, "project reset — please reload"); } catch { /* already closed */ }
+      return;
+    }
     const k = keyOf(key);
     let room = rooms.get(k);
     if (!room) {
@@ -429,8 +451,39 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     return { rooms: rooms.size, clients };
   }
 
+  function setLockout(projectId: number, durationMs: number): void {
+    lockoutUntil.set(projectId, Date.now() + durationMs);
+    rootLog.info("realtime: lockout set", { projectId, durationMs });
+  }
+
+  function isLockedOut(projectId: number): boolean {
+    const until = lockoutUntil.get(projectId);
+    if (!until) return false;
+    if (Date.now() >= until) {
+      lockoutUntil.delete(projectId);
+      return false;
+    }
+    return true;
+  }
+
+  // Post-deploy startup hook: read a marker file written by the admin
+  // CLI flow ("after I edit something on disk, evict everyone"). Lockout
+  // the listed project IDs for 90s so the very first client that
+  // reconnects after the service restart gets force-reloaded — instead
+  // of re-stamping its stale Y.Doc onto the freshly-edited disk content.
+  // Marker is deleted after read so the lockout doesn't fire on every
+  // subsequent boot.
+  try {
+    const marker = path.join(cfg.dataDir, ".evict-on-start-projects");
+    const raw = fs.readFileSync(marker, "utf8");
+    const ids = raw.split(/[\s,]+/).map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0);
+    for (const id of ids) setLockout(id, 90_000);
+    if (ids.length) rootLog.info("realtime: post-restart lockouts applied from marker", { ids });
+    fs.unlinkSync(marker);
+  } catch { /* no marker — normal startup */ }
+
   rootLog.info("realtime: service ready");
-  return { handleConnection, flushBeforeCompile, evictProject, status };
+  return { handleConnection, flushBeforeCompile, evictProject, setLockout, isLockedOut, status };
 }
 
 // Module-level singleton so the compile flow can call flushBeforeCompile()

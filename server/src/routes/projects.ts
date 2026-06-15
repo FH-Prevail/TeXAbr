@@ -222,6 +222,27 @@ export function projectsRouter(cfg: Config, db: Db) {
     }
   });
 
+  // Owner-only: force every live editing session for the project to
+  // reload. Closes all WS clients with code 4000 ("project reset"),
+  // wipes CRDT sidecars, AND locks out new connections for 90s so the
+  // very first client to reconnect after force-close also gets bounced
+  // and reloads — by the time the lockout expires every client is on
+  // a fresh Y.Doc, and the on-disk content wins. Useful after a manual
+  // server-side edit (database fix, deployment script, etc.) when you
+  // don't want a stale collaborator tab to re-stamp the old version.
+  r.post("/:id/evict-sessions", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "owner", res);
+    if (!p) return;
+    const rt = getRealtime();
+    if (!rt) return res.json({ ok: true, evicted: { rooms: 0, sidecars: 0 }, lockoutMs: 0 });
+    const lockoutMs = 90_000;
+    rt.setLockout(p.id, lockoutMs);
+    const evicted = rt.evictProject(p.id);
+    db.log.info("force-evict-sessions", { projectId: p.id, actor: u.username, ...evicted, lockoutMs });
+    res.json({ ok: true, evicted, lockoutMs });
+  });
+
   // Owner-only: rewind the working tree to a past commit. Auto-creates a
   // safety tag, evicts in-memory CRDT rooms for the project (otherwise
   // the live Yjs state would overwrite the reset on the next save), and

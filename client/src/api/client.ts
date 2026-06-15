@@ -84,6 +84,9 @@ export const api = {
     revertToLastGoodCompile: (id: number) =>
       call<{ ok: true; newHead: string; safetyTag: string; evicted: { rooms: number; sidecars: number }; target: { shortHash: string; timestamp: number; author: string } }>(
         "POST", `/api/projects/${id}/last-good-compile/revert`),
+    evictSessions: (id: number) =>
+      call<{ ok: true; evicted: { rooms: number; sidecars: number }; lockoutMs: number }>(
+        "POST", `/api/projects/${id}/evict-sessions`),
     presence: (id: number) => call<{ users: PresenceUser[] }>("GET", `/api/projects/${id}/presence`),
     heartbeat: (id: number) => call<{ ok: true }>("POST", `/api/projects/${id}/presence`),
     getState:  (id: number) => call<{ state: ProjectUiState | null }>("GET", `/api/projects/${id}/state`),

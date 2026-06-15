@@ -309,6 +309,30 @@ function ProjectDetails({
             ? "You own this project."
             : `Shared by ${project.owner_username}.`}
         </p>
+        {project.access_role === "owner" && (
+          <button
+            type="button"
+            onClick={async () => {
+              const ok = confirm(
+                `Force every live editing session for "${project.name}" to reload?\n\n` +
+                "Every collaborator's open tab will reload. Use this after you (or an admin) " +
+                "made a server-side change and don't want a stale collaborator's CRDT to overwrite it.\n\n" +
+                "Tip: new connections will be blocked for 90 seconds, so reconnecting clients also get bounced."
+              );
+              if (!ok) return;
+              try {
+                const r = await api.projects.evictSessions(project.id);
+                alert(`Reloaded ${r.evicted.rooms} live session(s), cleared ${r.evicted.sidecars} CRDT cache(s). New connections blocked for ${r.lockoutMs / 1000}s.`);
+              } catch (err) {
+                alert(`Failed: ${(err as Error).message}`);
+              }
+            }}
+            style={{ marginTop: 8 }}
+            title="Useful when you've edited the project from outside the editor and need every collaborator's tab to drop its in-memory CRDT and resync from disk."
+          >
+            Force-reload all live sessions
+          </button>
+        )}
       </div>
 
       {project.access_role === "owner" && (
