@@ -125,6 +125,58 @@ export async function compile(
       return result;
     };
 
+    // Run bibtex/biber for the bibliography pass between pdflatex runs.
+    // Without this, every \cite{} renders as [?] because pdflatex alone
+    // doesn't process .bib files — it only consumes the .bbl that bibtex
+    // produces. Sandboxed under the same bwrap profile as the engine.
+    const baseNoExtForBib = path.basename(mainBasename, path.extname(mainBasename));
+    const runBibTool = async (tool: "bibtex" | "biber") => {
+      const bibTimeoutMs = db.registry.getInt("latex.timeoutMs");
+      let bibTimer: NodeJS.Timeout | null = null;
+      let bibPid: number | undefined;
+      const result = await spawnSandboxed(db, {
+        projectRoot,
+        engine: tool,
+        args: [baseNoExtForBib],
+        env,
+        cwd: mainDirAbs,
+      }, (pid) => {
+        bibPid = pid;
+        trackProc(pid);
+        bibTimer = setTimeout(() => {
+          if (bibPid) {
+            try { process.kill(-bibPid, "SIGKILL"); }
+            catch {
+              try { process.kill(bibPid, "SIGKILL"); } catch {}
+            }
+          }
+        }, bibTimeoutMs);
+      });
+      if (bibTimer) clearTimeout(bibTimer);
+      untrackProc(bibPid);
+      return result;
+    };
+
+    // Inspect the .aux from pass 1 to decide whether a bib pass is needed.
+    // - \citation / \bibdata → classic bibtex
+    // - \abx@aux → biblatex/biber (newer pipeline; emits .bcf rather than
+    //   asking bibtex via .aux, but the presence of these markers is the
+    //   tell-tale that biber should run instead of bibtex).
+    const auxPathForCheck = path.join(mainDirAbs, `${baseNoExtForBib}.aux`);
+    const bcfPathForCheck = path.join(mainDirAbs, `${baseNoExtForBib}.bcf`);
+    async function detectBibTool(): Promise<"bibtex" | "biber" | null> {
+      try {
+        await fs.access(bcfPathForCheck);
+        return "biber";
+      } catch { /* no .bcf — not biblatex */ }
+      try {
+        const aux = await fs.readFile(auxPathForCheck, "utf8");
+        if (aux.includes("\\abx@aux")) return "biber";
+        if (aux.includes("\\citation") && aux.includes("\\bibdata")) return "bibtex";
+      } catch { /* no .aux yet */ }
+      return null;
+    }
+
     // Flush any active Yjs room for the main file to disk BEFORE pdflatex
     // reads it. Without this, edits that happened in the last <2s of typing
     // (the room's debounce window) would compile against stale bytes.
@@ -138,7 +190,26 @@ export async function compile(
     const r1 = await run();
     let last = r1;
     if (r1.code === 0 && !killedByTimeout) {
-      last = await run();
+      // Standard LaTeX cycle: if there are citations, we need
+      //   pdflatex → bibtex/biber → pdflatex → pdflatex
+      // to populate the .bbl and resolve cross-references. Without this
+      // every \cite{} renders as [?] no matter how good the .bib is.
+      const bibTool = await detectBibTool();
+      if (bibTool) {
+        const bibResult = await runBibTool(bibTool);
+        if (bibResult.code !== 0) {
+          db.log.warn(`${bibTool} failed`, {
+            projectId: opts.projectId, code: bibResult.code, stderr: bibResult.stderr?.slice(0, 500),
+          });
+        }
+        // Two more pdflatex passes: the first reads the freshly-built .bbl,
+        // the second resolves the back-references and page numbers that
+        // moved as a result.
+        if (!killedByTimeout) last = await run();
+        if (!killedByTimeout && last.code === 0) last = await run();
+      } else {
+        last = await run();
+      }
     }
 
     if (await pathSizeBytes(projectRoot) > mbToBytes(db.registry.getInt("limits.maxProjectMb"))) {
