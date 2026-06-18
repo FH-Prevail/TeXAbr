@@ -80,7 +80,7 @@ async function main() {
     const registrationMode = getRegistrationMode(cfg, db);
     res.json({
       app: "texabr",
-      version: "1.0.0",
+      version: "1.5.0",
       registration: registrationFlags(registrationMode),
       latex: {
         engines: db.registry.getStringList("latex.engines"),
