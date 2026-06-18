@@ -1,4 +1,4 @@
-# TeXAbr 1.0
+# TeXAbr 1.5
 
 <p align="center">
   <img src="assets/logo.png" alt="TeXAbr logo" width="180" />
@@ -221,8 +221,7 @@ GET /api/readyz    # readiness — DB ping + dataDir writable + schema migrated
 
 What TeXAbr is **not** doing (be explicit):
 
-- **No real-time collab.** Two simultaneous editors of the same file get a soft single-writer lock; the second sees a 409 with the holder's name. CRDT/OT collab is out of scope for 1.0.
-- **No automatic restore.** Backups are written by the timer; recovery is operator-driven.
+- **No automatic restore.** Restic backups are written by the timer; recovery is operator-driven.
 
 ## Upgrading an already-installed host
 
