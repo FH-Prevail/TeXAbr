@@ -109,6 +109,27 @@ async function main() {
   const { initRealtime } = await import("./services/realtime");
   const realtime = initRealtime(log, cfg);
 
+  // Post-deploy / post-CLI-edit marker: tokens of the form "<projectId>" or
+  // "<projectId>:<ignored>" (the seconds field is kept for backward compat
+  // with the old lockout format and just ignored now). For each project we
+  // bump every file's epoch by 1, which retires the old rooms and forces
+  // every connected tab to refetch the new epoch on next connect.
+  try {
+    const markerPath = path.join(cfg.dataDir, ".evict-on-start-projects");
+    const raw = fs.readFileSync(markerPath, "utf8");
+    const tokens = raw.split(/[\s,]+/).filter(Boolean);
+    const bumped: number[] = [];
+    for (const tok of tokens) {
+      const id = Number(tok.split(":")[0]);
+      if (!Number.isInteger(id) || id <= 0) continue;
+      const rows = db.fileEpochs.bumpAllInProject(id);
+      bumped.push(id);
+      log.info("realtime: post-restart epoch bump from marker", { projectId: id, rowsBumped: rows });
+    }
+    if (bumped.length) log.info("realtime: marker consumed", { bumped });
+    fs.unlinkSync(markerPath);
+  } catch { /* no marker — normal startup */ }
+
   // Serve built client.
   const clientDist = path.resolve(__dirname, "../../client/dist");
   if (fs.existsSync(clientDist)) {
@@ -220,17 +241,26 @@ async function main() {
       return;
     }
 
-    // Eviction escape-hatch: a client that just reloaded due to a code-4000
-    // close tags its next connect with ?fresh=1. We trust this (no real
-    // attacker gains from setting it: at worst they get rejected the same
-    // way real-stale clients would be in the next eviction cycle) and pass
-    // it through so realtime.handleConnection skips the lockout check.
-    const isFreshReload = /[?&]fresh=1\b/.test(url);
+    // Epoch validation: the client tags its WS URL with ?epoch=N. We compare
+    // against the current server epoch for (projectId, relPath). On mismatch,
+    // we complete the upgrade so we can send a proper close frame (code 4000
+    // with reason "epoch mismatch"), which the client uses as the trigger to
+    // destroy its local Y.Doc and refetch the new epoch. Missing/invalid
+    // epoch is treated as 0, which is never a real epoch (real epochs start
+    // at 1), so legacy/old-bundle clients are correctly forced to refresh.
+    const epochMatch = url.match(/[?&]epoch=(\d+)\b/);
+    const clientEpoch = epochMatch ? Number(epochMatch[1]) : 0;
+    const currentEpoch = db.fileEpochs.get(projectId, relPath);
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       const scopedLog = log.child({ module: "yjs", user: user.username, projectId, relPath });
-      scopedLog.info("yjs: client joined", { isFreshReload });
-      realtime.handleConnection(ws, filePath, { projectId, relPath }, scopedLog, { isFreshReload });
+      if (clientEpoch !== currentEpoch) {
+        scopedLog.info("yjs: epoch mismatch — closing", { clientEpoch, currentEpoch });
+        try { ws.close(4000, "epoch mismatch"); } catch { /* already closed */ }
+        return;
+      }
+      scopedLog.info("yjs: client joined", { epoch: currentEpoch });
+      realtime.handleConnection(ws, filePath, { projectId, relPath, epoch: currentEpoch }, scopedLog);
     });
   });
 
@@ -263,6 +293,12 @@ async function main() {
     // this leaves headroom; tweak via `--shutdownGraceMs` env if needed.
     const graceMs = Number(process.env.TEXABR_SHUTDOWN_GRACE_MS ?? 30_000);
     await drain(graceMs, log);
+
+    // After compiles finish, persist every live Y.Doc to disk + sidecar
+    // before exit. Otherwise the last 2s of typing (the saveNow debounce
+    // window) is lost on systemctl restart.
+    try { await realtime.flushAll(); }
+    catch (err) { log.warn("realtime.flushAll failed during shutdown", { err }); }
 
     log.info("shutdown complete");
     process.exit(0);

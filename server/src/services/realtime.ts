@@ -40,18 +40,19 @@ const GRACE_PERIOD_MS = 60_000;
 // the transaction origin).
 const ORIGIN_SERVER_LOAD = Symbol("server-load");
 
-// Sidecar path for the binary CRDT state. We hash the absolute file path so
-// the sidecar tree never reflects user-visible paths (no need to mirror
-// project structure, no path-traversal surface). Lives under dataDir/yjs-state/
-// so restic backups cover it for free.
-function sidecarPathFor(cfg: Config, filePath: string): string {
-  const hash = crypto.createHash("sha256").update(filePath).digest("hex");
+// Sidecar path for the binary CRDT state. We hash the absolute file path AND
+// the epoch so an epoch bump silently retires the old sidecar — the next
+// epoch's room hydrates from disk text without merging the pre-bump CRDT
+// items. Lives under dataDir/yjs-state/ so restic backups cover it for free.
+function sidecarPathFor(cfg: Config, filePath: string, epoch: number): string {
+  const hash = crypto.createHash("sha256").update(`${filePath}::${epoch}`).digest("hex");
   return path.join(cfg.dataDir, "yjs-state", `${hash}.bin`);
 }
 
 export interface RoomKey {
   projectId: number;
   relPath: string;
+  epoch: number;
 }
 
 interface Room {
@@ -73,57 +74,39 @@ interface Room {
 }
 
 export interface RealtimeService {
-  // Called from the HTTP upgrade handler after auth + access checks pass.
-  // opts.isFreshReload: this connection comes from a tab that already
-  //   reloaded due to a previous code-4000 close, so the per-project
-  //   lockout check should be skipped — otherwise the tab would just get
-  //   bounced again and the user ends up in a reload loop.
-  handleConnection(ws: WebSocket, filePath: string, key: RoomKey, log: Logger, opts?: { isFreshReload?: boolean }): void;
+  // Called from the HTTP upgrade handler after auth + access checks AND
+  // epoch validation pass. key.epoch is the current server-side epoch.
+  handleConnection(ws: WebSocket, filePath: string, key: RoomKey, log: Logger): void;
   // Used by the compile flow to materialise the latest in-memory text to
   // disk before pdflatex sees it. No-op if no room exists.
   flushBeforeCompile(filePath: string): Promise<void>;
-  // Tear down every room for a project and delete its CRDT sidecars.
-  // Used by the revert flow so the in-memory CRDT doesn't re-stamp the
-  // pre-revert content over the freshly-reset working tree. Disconnects
-  // all attached clients so they reconnect into a fresh room hydrated
-  // from disk. Returns the number of rooms destroyed and sidecars removed.
+  // Tear down every room for a project and close attached clients with
+  // close code 4000. Used by the revert flow + the evict-sessions admin
+  // button. Combined with an epoch bump (by the caller), this guarantees
+  // surviving stale clients can't reconnect into the new epoch's room.
   evictProject(projectId: number): { rooms: number; sidecars: number };
-  // Lock the project out for N ms: any new WS upgrade for the project
-  // gets force-closed with code 4000 (which triggers a client-side
-  // window.location.reload via useRealtimeFile, dropping the local
-  // Y.Doc). Used together with evictProject when a server-side edit
-  // would otherwise be over-stamped by a stale client's CRDT on
-  // reconnect.
-  setLockout(projectId: number, durationMs: number): void;
-  isLockedOut(projectId: number): boolean;
+  // Persist every room's in-memory Y.Doc to disk (plain text + sidecar)
+  // before the process exits. Called from the shutdown drain so the
+  // last 2s window of typing doesn't get lost on systemctl restart.
+  flushAll(): Promise<void>;
   // Inspect: how many rooms are live (admin diagnostics).
   status(): { rooms: number; clients: number };
 }
 
-const keyOf = (k: RoomKey) => `${k.projectId}:${k.relPath}`;
-
-function walkFiles(dir: string, visit: (abs: string) => void): void {
-  let entries: fs.Dirent[];
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-  for (const e of entries) {
-    if (e.name.startsWith(".")) continue;
-    const full = path.join(dir, e.name);
-    if (e.isDirectory()) walkFiles(full, visit);
-    else if (e.isFile()) visit(full);
-  }
-}
+// Room key includes the epoch so a bump silently retires the room: any
+// surviving WS client trying to join the OLD epoch still hits the lockout-
+// style reject below and reloads, but the NEW epoch's room can be created
+// alongside without merging the stale CRDT items.
+const keyOf = (k: RoomKey) => `${k.projectId}:${k.relPath}:${k.epoch}`;
 
 export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   const rooms = new Map<string, Room>();
-  // Per-project lockout window: while now < lockoutUntil[pid], every
-  // incoming WS upgrade for that project gets closed with code 4000 so
-  // the client reloads with a fresh Y.Doc. Used by setLockout, checked
-  // by handleConnection.
-  const lockoutUntil = new Map<number, number>();
+  // (Pre-epoch lockout map removed — epoch validation in index.ts is the
+  // sole gate for "stale tab tries to merge into wrong doc generation.")
 
-  function createRoom(key: string, filePath: string, log: Logger): Room {
+  function createRoom(key: string, filePath: string, epoch: number, log: Logger): Room {
     const doc = new Y.Doc();
-    const scPath = sidecarPathFor(cfg, filePath);
+    const scPath = sidecarPathFor(cfg, filePath, epoch);
 
     // Hydration order: binary CRDT sidecar first (preserves the full doc
     // history so a reconnecting client's local CRDT items merge cleanly
@@ -265,27 +248,16 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     room.log.info("realtime: room closed", { key: room.key });
   }
 
-  function handleConnection(ws: WebSocket, filePath: string, key: RoomKey, log: Logger, opts?: { isFreshReload?: boolean }) {
-    // Lockout check: if the project was recently force-evicted (manual
-    // disk edit, or the post-deploy startup hook), refuse the connection
-    // and tell the client to reload. After reload its local Y.Doc is
-    // gone and the next connect attempt sees clean state.
-    //
-    // The fresh-reload flag is the escape hatch: it tells us this tab
-    // already reloaded once due to a previous 4000 close, so its Y.Doc
-    // is already empty — bouncing it again would just cause a reload
-    // loop. Trust the flag and let the connection through.
-    if (!opts?.isFreshReload && isLockedOut(key.projectId)) {
-      log.info("realtime: connection refused — project locked out", { projectId: key.projectId });
-      try { ws.close(4000, "project reset — please reload"); } catch { /* already closed */ }
-      return;
-    }
+  function handleConnection(ws: WebSocket, filePath: string, key: RoomKey, log: Logger) {
+    // Epoch validation already happened in the WS upgrade handler. By the
+    // time we get here, key.epoch matches the current server-side epoch
+    // for this (project, file). There's no lockout to check anymore.
     const k = keyOf(key);
     let room = rooms.get(k);
     if (!room) {
-      room = createRoom(k, filePath, log.child({ room: k }));
+      room = createRoom(k, filePath, key.epoch, log.child({ room: k }));
       rooms.set(k, room);
-      room.log.info("realtime: room opened", { filePath });
+      room.log.info("realtime: room opened", { filePath, epoch: key.epoch });
     } else {
       // A client may rejoin during the post-last-disconnect grace window;
       // cancel the pending destruction so we keep the in-memory CRDT state
@@ -412,34 +384,25 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
       destroyRoom(room);
       rooms_evicted++;
     }
-    // Also scan the on-disk sidecar dir for any other paths that belonged to
-    // this project but had no live room. We can't reverse the sha256, so we
-    // enumerate every file currently on disk under <dataDir>/projects/*/<id>/
-    // and delete the sidecars whose hashes match those paths.
-    try {
-      // Owner ID is encoded in the room key when available, but we may have
-      // no live rooms left for the project (orphan sidecars from prior
-      // sessions). Walk the projects tree for all owners and find the
-      // <id>/<projectId> directory.
-      const projectsRoot = path.join(cfg.dataDir, "projects");
-      for (const ownerDir of fs.readdirSync(projectsRoot, { withFileTypes: true })) {
-        if (!ownerDir.isDirectory()) continue;
-        const projectDir = path.join(projectsRoot, ownerDir.name, String(projectId));
-        if (!fs.existsSync(projectDir)) continue;
-        walkFiles(projectDir, (abs) => {
-          const side = sidecarPathFor(cfg, abs);
-          try {
-            fs.unlinkSync(side);
-            sidecars_removed++;
-          } catch { /* no sidecar for this path */ }
-        });
-        break;
-      }
-    } catch (err) {
-      rootLog.warn("evictProject: orphan-sidecar sweep failed", { err, projectId });
-    }
+    // No orphan-sidecar sweep here anymore: with epoch-keyed sidecars, the
+    // post-bump room creates a fresh sidecar at a new hash and never reads
+    // the old one. The pre-bump sidecars are dead data on disk; a periodic
+    // cleanup job (GC of any sidecar whose epoch is < current) can reap
+    // them. We never accidentally re-merge a stale CRDT through them.
     rootLog.info("realtime: project evicted", { projectId, rooms: rooms_evicted, sidecars: sidecars_removed });
     return { rooms: rooms_evicted, sidecars: sidecars_removed };
+  }
+
+  async function flushAll(): Promise<void> {
+    // Final persistence pass before the process exits. Each room's saveNow
+    // writes both the plain text (consumed by pdflatex/backups/diff tools)
+    // and the binary CRDT sidecar (so the next boot can rehydrate the doc
+    // with item-IDs intact, instead of re-seeding from text and creating
+    // the fresh-IDs-vs-old-client-IDs duplication trap we used to hit).
+    const all = Array.from(rooms.values());
+    rootLog.info("realtime: flushAll start", { rooms: all.length });
+    await Promise.allSettled(all.map((room) => saveNow(room)));
+    rootLog.info("realtime: flushAll done");
   }
 
   async function flushBeforeCompile(filePath: string): Promise<void> {
@@ -460,52 +423,8 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     return { rooms: rooms.size, clients };
   }
 
-  function setLockout(projectId: number, durationMs: number): void {
-    lockoutUntil.set(projectId, Date.now() + durationMs);
-    rootLog.info("realtime: lockout set", { projectId, durationMs });
-  }
-
-  function isLockedOut(projectId: number): boolean {
-    const until = lockoutUntil.get(projectId);
-    if (!until) return false;
-    if (Date.now() >= until) {
-      lockoutUntil.delete(projectId);
-      return false;
-    }
-    return true;
-  }
-
-  // Post-deploy startup hook: read a marker file written by the admin
-  // CLI flow ("after I edit something on disk, evict everyone"). Lockout
-  // the listed project IDs for 90s so the very first client that
-  // reconnects after the service restart gets force-reloaded — instead
-  // of re-stamping its stale Y.Doc onto the freshly-edited disk content.
-  // Marker is deleted after read so the lockout doesn't fire on every
-  // subsequent boot.
-  try {
-    const marker = path.join(cfg.dataDir, ".evict-on-start-projects");
-    const raw = fs.readFileSync(marker, "utf8");
-    // Each token: "<projectId>" (defaults to 1h) or "<projectId>:<seconds>".
-    // 90s was too short — by the time a collaborator actually opened a tab
-    // the lockout had already expired, and their stale Y.Doc reasserted
-    // itself. 1h covers normal working-day timescales.
-    const tokens = raw.split(/[\s,]+/).filter(Boolean);
-    const applied: { id: number; durationMs: number }[] = [];
-    for (const tok of tokens) {
-      const [idStr, secStr] = tok.split(":");
-      const id = Number(idStr);
-      if (!Number.isInteger(id) || id <= 0) continue;
-      const seconds = Number(secStr);
-      const durationMs = (Number.isFinite(seconds) && seconds > 0 ? seconds : 3600) * 1000;
-      setLockout(id, durationMs);
-      applied.push({ id, durationMs });
-    }
-    if (applied.length) rootLog.info("realtime: post-restart lockouts applied from marker", { applied });
-    fs.unlinkSync(marker);
-  } catch { /* no marker — normal startup */ }
-
   rootLog.info("realtime: service ready");
-  return { handleConnection, flushBeforeCompile, evictProject, setLockout, isLockedOut, status };
+  return { handleConnection, flushBeforeCompile, evictProject, flushAll, status };
 }
 
 // Module-level singleton so the compile flow can call flushBeforeCompile()

@@ -10,6 +10,7 @@ import { makeSettingsRegistry, type SettingsRegistry } from "./settingsRegistry"
 import { migrate } from "./migrations";
 import { makeLogger, type Logger, type LogLevel } from "../services/logger";
 import { makeAudit, type AuditService } from "../services/audit";
+import { makeFileEpochs, type FileEpochs } from "../services/fileEpoch";
 
 // Db doubles as the request-scoped service container: routers receive (cfg, db)
 // and read whatever they need off it. Keeps existing route signatures stable.
@@ -22,6 +23,7 @@ export interface Db {
   registry: SettingsRegistry;
   log: Logger;
   audit: AuditService;
+  fileEpochs: FileEpochs;
 }
 
 export function initDb(cfg: Config): Db {
@@ -37,7 +39,7 @@ export function initDb(cfg: Config): Db {
   const log = makeLogger(() => registry.getEnum("logging.level") as LogLevel);
   const audit = makeAudit(raw, log);
 
-  return {
+  const dbObj: Db = {
     raw,
     users: makeUsers(raw),
     projects: makeProjects(raw),
@@ -46,5 +48,8 @@ export function initDb(cfg: Config): Db {
     registry,
     log,
     audit,
+    fileEpochs: undefined as unknown as FileEpochs,
   };
+  dbObj.fileEpochs = makeFileEpochs(dbObj);
+  return dbObj;
 }

@@ -12,7 +12,12 @@ export function compileRouter(cfg: Config, db: Db) {
 
   r.post("/:projectId", async (req, res) => {
     const u = req.user!;
-    const project = requireProjectAccess(db, u, Number(req.params.projectId), "reader", res);
+    // Successful compile mutates git (autosave checkpoint + last-good-compile
+    // tag), so readers cannot be allowed to drive it — otherwise a read-only
+    // collaborator can move the "good" pointer and trigger autosave commits
+    // for a project they're not supposed to be modifying. Editors and owners
+    // only.
+    const project = requireProjectAccess(db, u, Number(req.params.projectId), "editor", res);
     if (!project) return;
 
     const proposalId = Number(req.body?.proposalId ?? 0);

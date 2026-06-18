@@ -44,7 +44,7 @@ export async function compile(
   }
 
   const q = getQueue(db);
-  await q.acquire(opts.userId);
+  await q.acquire(opts.userId, opts.projectId);
   const started = Date.now();
 
   const sandboxAv = detectSandbox();
@@ -249,13 +249,14 @@ export async function compile(
     // NOT commit), then moves the tag onto the resulting HEAD. Without
     // the pre-commit, HEAD could lag behind what was actually compiled
     // and the tag would point at the wrong content.
-    // Failure to tag is non-fatal: the next good compile will move it.
+    // Awaited inside the per-project compile lock so two collaborators
+    // can never race through the same git index (which previously
+    // produced "Auto-checkpoint" commits stamped within the same second).
     if (result.ok) {
       const actor = db.users.findById(opts.userId);
       if (actor) {
-        tagLastGoodCompile(projectRoot, actor).catch((err) => {
-          db.log.warn("tagLastGoodCompile failed", { err, projectId: opts.projectId });
-        });
+        try { await tagLastGoodCompile(projectRoot, actor); }
+        catch (err) { db.log.warn("tagLastGoodCompile failed", { err, projectId: opts.projectId }); }
       }
     }
 
@@ -286,7 +287,7 @@ export async function compile(
     }
     throw err;
   } finally {
-    q.release(opts.userId);
+    q.release(opts.userId, opts.projectId);
   }
 }
 

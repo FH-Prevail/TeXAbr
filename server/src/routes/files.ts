@@ -114,6 +114,10 @@ export function filesRouter(cfg: Config, db: Db) {
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Edit ${rel}`, u);
+      // HTTP write happens outside the Yjs CRDT — the live room (if any)
+      // has no way to merge this content. Bumping the epoch retires the
+      // old room so the next reconnect rebuilds from the new disk bytes.
+      if (!target.proposal) db.fileEpochs.bump(p.id, rel);
       res.json({ ok: true });
     } catch (err) {
       if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });
@@ -137,6 +141,7 @@ export function filesRouter(cfg: Config, db: Db) {
     try {
       const full = resolveSafe(root, rel);
       await fs.rm(full, { recursive: true, force: true });
+      if (!target.proposal) db.fileEpochs.bump(p.id, rel);
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Delete ${rel}`, u);
@@ -193,6 +198,11 @@ export function filesRouter(cfg: Config, db: Db) {
       const dst = resolveSafe(root, to);
       await fs.mkdir(path.dirname(dst), { recursive: true });
       await fs.rename(src, dst);
+      if (!target.proposal) {
+        // Source path no longer exists, destination needs a fresh room.
+        db.fileEpochs.bump(p.id, from);
+        db.fileEpochs.bump(p.id, to);
+      }
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Rename ${from} to ${to}`, u);
@@ -237,6 +247,7 @@ export function filesRouter(cfg: Config, db: Db) {
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Copy files to ${destination}`, u);
+      if (!target.proposal) db.fileEpochs.bumpAllInProject(p.id);
       res.json({ ok: true });
     } catch (err) {
       if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });
@@ -283,6 +294,7 @@ export function filesRouter(cfg: Config, db: Db) {
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Upload ${rel}`, u);
+      if (!target.proposal) db.fileEpochs.bump(p.id, rel);
       res.json({ ok: true, path: rel });
     } catch (err) {
       if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });

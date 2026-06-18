@@ -144,6 +144,18 @@ export function projectsRouter(cfg: Config, db: Db) {
     res.json({ members: db.projects.listMembers(p.id) });
   });
 
+  // Per-file epoch lookup. Clients call this once before opening a Yjs WS
+  // so they can tag the upgrade URL with ?epoch=N. Reader access is enough
+  // (epoch is just a generation counter, not a secret).
+  r.get("/:id/file-epoch", (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    const rel = typeof req.query.path === "string" ? req.query.path : "";
+    if (!rel) return res.status(400).json({ error: "path required" });
+    res.json({ epoch: db.fileEpochs.get(p.id, rel) });
+  });
+
   r.get("/:id/history", async (req, res) => {
     const u = req.user!;
     const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
@@ -210,6 +222,7 @@ export function projectsRouter(cfg: Config, db: Db) {
     }
     const rt = getRealtime();
     const evicted = rt ? rt.evictProject(p.id) : { rooms: 0, sidecars: 0 };
+    db.fileEpochs.bumpAllInProject(p.id);
     try {
       const result = await revertToCommit(root, info.hash, u);
       db.log.info("revert to last good compile", {
@@ -222,31 +235,23 @@ export function projectsRouter(cfg: Config, db: Db) {
     }
   });
 
-  // Owner-only: force every live editing session for the project to
-  // reload. Closes all WS clients with code 4000 ("project reset"),
-  // wipes CRDT sidecars, AND locks out new connections for 90s so the
-  // very first client to reconnect after force-close also gets bounced
-  // and reloads — by the time the lockout expires every client is on
-  // a fresh Y.Doc, and the on-disk content wins. Useful after a manual
-  // server-side edit (database fix, deployment script, etc.) when you
-  // don't want a stale collaborator tab to re-stamp the old version.
+  // Owner-only: force every live editing session for the project to reload.
+  // Closes all WS clients with code 4000, AND bumps every file's epoch so
+  // the surviving stale clients cannot reconnect into the same room — they
+  // refetch the new epoch and start fresh.
   r.post("/:id/evict-sessions", async (req, res) => {
     const u = req.user!;
     const p = requireProjectAccess(db, u, Number(req.params.id), "owner", res);
     if (!p) return;
     const rt = getRealtime();
-    if (!rt) return res.json({ ok: true, evicted: { rooms: 0, sidecars: 0 }, lockoutMs: 0 });
-    const lockoutMs = 90_000;
-    rt.setLockout(p.id, lockoutMs);
+    if (!rt) return res.json({ ok: true, evicted: { rooms: 0, sidecars: 0 }, epochBumped: 0 });
+    const epochBumped = db.fileEpochs.bumpAllInProject(p.id);
     const evicted = rt.evictProject(p.id);
-    db.log.info("force-evict-sessions", { projectId: p.id, actor: u.username, ...evicted, lockoutMs });
-    res.json({ ok: true, evicted, lockoutMs });
+    db.log.info("force-evict-sessions", { projectId: p.id, actor: u.username, ...evicted, epochBumped });
+    res.json({ ok: true, evicted, epochBumped });
   });
 
-  // Owner-only: rewind the working tree to a past commit. Auto-creates a
-  // safety tag, evicts in-memory CRDT rooms for the project (otherwise
-  // the live Yjs state would overwrite the reset on the next save), and
-  // closes all attached WS clients so they reconnect into fresh rooms.
+  // Owner-only: rewind the working tree to a past commit.
   r.post("/:id/history/:hash/revert", async (req, res) => {
     const u = req.user!;
     const p = requireProjectAccess(db, u, Number(req.params.id), "owner", res);
@@ -254,6 +259,7 @@ export function projectsRouter(cfg: Config, db: Db) {
     const root = await ensureProjectDir(cfg, p.owner_id, p.id);
     const rt = getRealtime();
     const evicted = rt ? rt.evictProject(p.id) : { rooms: 0, sidecars: 0 };
+    db.fileEpochs.bumpAllInProject(p.id);
     try {
       const result = await revertToCommit(root, req.params.hash, u);
       db.log.info("project reverted", {

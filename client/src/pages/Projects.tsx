@@ -315,14 +315,15 @@ function ProjectDetails({
             onClick={async () => {
               const ok = confirm(
                 `Force every live editing session for "${project.name}" to reload?\n\n` +
-                "Every collaborator's open tab will reload. Use this after you (or an admin) " +
-                "made a server-side change and don't want a stale collaborator's CRDT to overwrite it.\n\n" +
-                "Tip: new connections will be blocked for 90 seconds, so reconnecting clients also get bounced."
+                "Every collaborator's open tab will drop its local CRDT state and resync from disk. " +
+                "Use this after you (or an admin) made a server-side change and don't want a stale " +
+                "collaborator's CRDT to overwrite it.\n\n" +
+                "File epochs will be bumped, so any reconnecting tab is forced to a fresh room."
               );
               if (!ok) return;
               try {
                 const r = await api.projects.evictSessions(project.id);
-                alert(`Reloaded ${r.evicted.rooms} live session(s), cleared ${r.evicted.sidecars} CRDT cache(s). New connections blocked for ${r.lockoutMs / 1000}s.`);
+                alert(`Closed ${r.evicted.rooms} live session(s); ${r.epochBumped} file epoch(s) bumped. Stale tabs will refetch the new epoch on next connect.`);
               } catch (err) {
                 alert(`Failed: ${(err as Error).message}`);
               }

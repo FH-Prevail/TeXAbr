@@ -105,6 +105,28 @@ const MIGRATIONS: Migration[] = [
       )`);
     },
   },
+  {
+    version: 7,
+    name: "file_epoch",
+    up: (db) => {
+      // Per-file generation counter. Bumped on revert, evict-sessions,
+      // HTTP overwrite, force-evict CLI, or any other server-authoritative
+      // mutation that the live Yjs CRDT can't have observed. The room key
+      // (and the sidecar hash) include epoch, so stale clients connecting
+      // with the OLD epoch are rejected at the WS upgrade rather than
+      // being allowed to merge their pre-mutation items into the new doc.
+      //
+      // Per-file (not per-project) granularity: editing one file in a
+      // project shouldn't force every other open file's room to reset.
+      db.exec(`CREATE TABLE IF NOT EXISTS file_epoch (
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        rel_path   TEXT NOT NULL,
+        epoch      INTEGER NOT NULL DEFAULT 1,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (project_id, rel_path)
+      )`);
+    },
+  },
 ];
 
 export function migrate(raw: Database.Database, cfg: Config) {

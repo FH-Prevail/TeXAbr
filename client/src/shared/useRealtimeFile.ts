@@ -4,15 +4,20 @@ import { WebsocketProvider } from "y-websocket";
 
 // React hook: open / keep / close a y-websocket connection to a single
 // (projectId, filePath) collaboration room. Returns the Y.Text the editor
-// should bind to plus the Awareness instance for cursor sharing in phase 3.
+// should bind to plus the Awareness instance for cursor sharing.
 //
-// Lifecycle:
-//   - When projectId or filePath changes, tear down the previous provider
-//     and open a new one against the new room.
-//   - Returns nulls during the brief window before the first connect; the
-//     editor falls back to its plain-text rendering during that window.
-//   - On unmount, disconnects and destroys the doc so server-side
-//     last-disconnect persistence kicks in.
+// Epoch protocol:
+//   1. Before opening the WS, fetch the current per-file epoch via HTTP.
+//   2. Tag the WS URL with ?epoch=N. The server rejects mismatches with
+//      close code 4000 + reason "epoch mismatch".
+//   3. On that close, destroy this tab's Y.Doc and the WebsocketProvider,
+//      refetch the epoch, and rebuild the room. No window.location.reload,
+//      no sessionStorage flags, no per-tab race state — just a small
+//      restart of the React effect.
+//
+// This replaces the older "lockout + fresh=1 + sessionStorage" workaround.
+// The epoch is the only thing that decides whether a client's CRDT state
+// belongs to the current server-side document generation.
 
 export interface RealtimeFileHandle {
   yText: Y.Text | null;
@@ -26,9 +31,11 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
   const [doc, setDoc] = useState<Y.Doc | null>(null);
   const [awareness, setAwareness] = useState<WebsocketProvider["awareness"] | null>(null);
   const [status, setStatus] = useState<"connecting" | "connected" | "disconnected">("disconnected");
+  // Bumping epochResetNonce restarts the effect, which destroys the existing
+  // Y.Doc + provider and rebuilds at the (now-current) epoch. The actual
+  // epoch fetch happens inside the effect.
+  const [epochResetNonce, setEpochResetNonce] = useState(0);
 
-  // Keep the latest provider around in a ref so unmount cleanup can reach it
-  // even if React batches multiple effect runs.
   const providerRef = useRef<WebsocketProvider | null>(null);
 
   useEffect(() => {
@@ -37,92 +44,90 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
       return;
     }
 
-    const ydoc = new Y.Doc();
-    // Build the server URL relative to the current origin so the same code
-    // works on http://dev and https://editor.texabr.org. The protocol is
-    // upgraded to ws:// or wss:// automatically by WebsocketProvider when
-    // we pass an absolute URL — we construct it explicitly.
-    const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
-    const serverUrl = `${wsProto}://${window.location.host}/api/projects/${projectId}/files-yjs`;
+    let cancelled = false;
+    let provider: WebsocketProvider | null = null;
+    let ydoc: Y.Doc | null = null;
+    let visibilityHandler: (() => void) | null = null;
 
-    // Eviction escape-hatch: if this tab was force-reloaded by code 4000
-    // within the last 30 seconds, mark the next WS connection with
-    // ?fresh=1. The server treats this as proof that the tab already
-    // dropped its stale Y.Doc and skips the per-project lockout check —
-    // otherwise the post-deploy lockout would bounce the tab again and
-    // we'd end up in a reload loop that the browser eventually kills.
-    const evictionKey = `texabr.evicted.${projectId}.${filePath}`;
-    const evictedAtStr = sessionStorage.getItem(evictionKey);
-    const evictedAt = evictedAtStr ? Number(evictedAtStr) : 0;
-    const isFreshReload = evictedAt > 0 && Date.now() - evictedAt < 30_000;
+    async function fetchEpoch(): Promise<number> {
+      const url = `/api/projects/${projectId}/file-epoch?path=${encodeURIComponent(filePath!)}`;
+      const r = await fetch(url, { credentials: "include" });
+      if (!r.ok) throw new Error(`epoch fetch failed: ${r.status}`);
+      const j = await r.json() as { epoch: number };
+      return j.epoch;
+    }
 
-    // y-websocket appends `/${roomName}` to serverUrl. We pass the file's
-    // relative path as the room — the server matches anything after
-    // /files-yjs/ as the file path, then resolveSafe rejects escapes.
-    const provider = new WebsocketProvider(serverUrl, filePath, ydoc, {
-      // Cookies are sent automatically; auth happens during the HTTP upgrade.
-      connect: true,
-      params: isFreshReload ? { fresh: "1" } : {},
-    });
-    providerRef.current = provider;
-
-    const text = ydoc.getText("content");
-
-    setDoc(ydoc);
-    setYText(text);
-    setAwareness(provider.awareness);
-    setStatus("connecting");
-
-    const onStatus = (e: { status: "connected" | "disconnected" | "connecting" }) => {
-      setStatus(e.status === "connected" ? "connected" : e.status === "connecting" ? "connecting" : "disconnected");
-    };
-    provider.on("status", onStatus);
-
-    // Server force-close with code 4000 ("project reset") means: drop your
-    // local Y.Doc and start over. We reload the tab so the Y.Doc dies,
-    // BUT we record the reload in sessionStorage and tag the next connect
-    // with ?fresh=1 so the server lockout check skips this tab. Without
-    // that escape-hatch we'd loop: reload -> reconnect -> server still
-    // locked -> 4000 -> reload -> ... until the browser kills the tab.
-    const onClose = (event: CloseEvent | null) => {
-      if (event?.code !== 4000) return;
-      if (isFreshReload) {
-        // Already came here via fresh=1 and STILL got bounced. Don't loop —
-        // server is misconfigured or the lockout is stuck. Surface to console
-        // and let the user retry manually.
-        sessionStorage.removeItem(evictionKey);
-        console.warn("texabr: re-evicted after fresh reconnect, not reloading");
-        return;
+    (async () => {
+      let epoch: number;
+      try {
+        epoch = await fetchEpoch();
+      } catch {
+        // If the epoch endpoint is unreachable, fall back to 1 — matches the
+        // server's default-on-miss behavior so we don't deadlock the editor.
+        epoch = 1;
       }
-      sessionStorage.setItem(evictionKey, String(Date.now()));
-      window.location.reload();
-    };
-    provider.on("connection-close", onClose);
+      if (cancelled) return;
 
-    // Backgrounded tabs in Chrome throttle timers and WS heartbeats, which
-    // makes y-websocket's reconnect loop flap repeatedly. Each flap fires a
-    // status event and re-renders, and historically also leaked binding
-    // state. Pausing the provider while hidden is also nicer to the server
-    // (fewer awareness pings) and the user's battery.
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        try { provider.disconnect(); } catch { /* already disconnected */ }
-      } else {
-        try { provider.connect(); } catch { /* already connected */ }
-      }
-    };
-    document.addEventListener("visibilitychange", onVisibility);
+      ydoc = new Y.Doc();
+      const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
+      const serverUrl = `${wsProto}://${window.location.host}/api/projects/${projectId}/files-yjs`;
+
+      provider = new WebsocketProvider(serverUrl, filePath!, ydoc, {
+        connect: true,
+        params: { epoch: String(epoch) },
+      });
+      providerRef.current = provider;
+
+      const text = ydoc.getText("content");
+      setDoc(ydoc);
+      setYText(text);
+      setAwareness(provider.awareness);
+      setStatus("connecting");
+
+      const onStatus = (e: { status: "connected" | "disconnected" | "connecting" }) => {
+        setStatus(e.status === "connected" ? "connected" : e.status === "connecting" ? "connecting" : "disconnected");
+      };
+      provider.on("status", onStatus);
+
+      // Server close code 4000 means "this client's epoch is stale (or the
+      // doc was reset)." Tear down the local Y.Doc + provider entirely and
+      // bump epochResetNonce, which restarts this effect from scratch. The
+      // fresh effect run refetches the epoch and builds a new room.
+      const onClose = (event: CloseEvent | null) => {
+        if (event?.code !== 4000) return;
+        provider?.off("status", onStatus);
+        provider?.off("connection-close", onClose);
+        try { provider?.disconnect(); } catch { /* already disconnected */ }
+        try { provider?.destroy(); } catch { /* already destroyed */ }
+        try { ydoc?.destroy(); } catch { /* already destroyed */ }
+        providerRef.current = null;
+        setYText(null); setDoc(null); setAwareness(null); setStatus("disconnected");
+        setEpochResetNonce((n) => n + 1);
+      };
+      provider.on("connection-close", onClose);
+
+      // Pause WS while the tab is backgrounded (Chrome throttles WS heartbeats,
+      // which used to flap reconnects and leak React state). Resume on visible.
+      visibilityHandler = () => {
+        if (!provider) return;
+        if (document.visibilityState === "hidden") {
+          try { provider.disconnect(); } catch { /* already disconnected */ }
+        } else {
+          try { provider.connect(); } catch { /* already connected */ }
+        }
+      };
+      document.addEventListener("visibilitychange", visibilityHandler);
+    })();
 
     return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      provider.off("status", onStatus);
-      provider.off("connection-close", onClose);
-      try { provider.disconnect(); } catch { /* already disconnected */ }
-      try { provider.destroy(); } catch { /* already destroyed */ }
-      try { ydoc.destroy(); } catch { /* already destroyed */ }
+      cancelled = true;
+      if (visibilityHandler) document.removeEventListener("visibilitychange", visibilityHandler);
+      try { provider?.disconnect(); } catch { /* already disconnected */ }
+      try { provider?.destroy(); } catch { /* already destroyed */ }
+      try { ydoc?.destroy(); } catch { /* already destroyed */ }
       providerRef.current = null;
     };
-  }, [projectId, filePath]);
+  }, [projectId, filePath, epochResetNonce]);
 
   return { yText, doc, awareness, status };
 }
