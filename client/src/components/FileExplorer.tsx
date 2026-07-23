@@ -12,6 +12,7 @@ import {
   FiClock,
   FiUpload,
   FiUploadCloud,
+  FiDownload,
 } from 'react-icons/fi';
 import InputDialog from './InputDialog';
 import ConfirmDialog from './ConfirmDialog';
@@ -564,6 +565,18 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
     });
   };
 
+  const handleDownloadFile = async () => {
+    if (!contextMenu || !contextMenu.target || contextMenu.target.isDirectory) {
+      return;
+    }
+    const target = contextMenu.target;
+    setContextMenu(null);
+    const result = await (window as any).api.downloadFile(target.path);
+    if (!result.success) {
+      alert(`Failed to download file: ${result.error}`);
+    }
+  };
+
   const handleZipFolder = () => {
     if (!contextMenu || !contextMenu.target || !contextMenu.target.isDirectory) {
       return;
@@ -881,6 +894,15 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
               <div className="context-menu-item" onClick={handleZipFolder}>
                 <FiArchive size={14} />
                 <span>Save Folder as ZIP</span>
+              </div>
+              <div className="context-menu-separator" />
+            </>
+          )}
+          {contextMenu.target && !contextMenu.target.isDirectory && (
+            <>
+              <div className="context-menu-item" onClick={handleDownloadFile}>
+                <FiDownload size={14} />
+                <span>Download File</span>
               </div>
               <div className="context-menu-separator" />
             </>

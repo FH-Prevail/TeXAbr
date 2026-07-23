@@ -222,6 +222,24 @@ async function uploadFiles(
   return { success: errors.length === 0, uploaded, errors };
 }
 
+// Fetch a single file's bytes over the authed /raw endpoint and trigger a
+// browser download. Used by the file tree's "Download" context-menu action so
+// a user can pull one file out of the project without zipping the whole thing.
+async function downloadFile(filePath: string) {
+  try {
+    const blob = await rest.files.rawBlob(pid(), rel(filePath), currentProposalId);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = pathHelpers.basename(filePath) || "download";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: (err as Error).message };
+  }
+}
+
 async function readDirectory(dirPath: string) {
   try {
     const r = await rest.files.tree(pid(), currentProposalId);
@@ -480,7 +498,7 @@ export function installShim() {
     readFile, readFileBase64, readBinaryFile,
     writeFile, createFile, deletePath, renamePath,
     readDirectory, createDirectory, copyPaths, uploadFiles,
-    saveZipFile,
+    saveZipFile, downloadFile,
     watchPath, unwatchPath, onFilesystemEvent,
     openDirectoryDialog, getDefaultProjectsDirectory, showInFileBrowser, openExternal,
     checkLatexInstallation, checkPackageInstalled, installLatexPackage, openLatexDownload,
