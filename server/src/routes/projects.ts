@@ -26,6 +26,16 @@ import { getRealtime } from "../services/realtime";
 import { ensureProjectDir, projectDir, resolveSafe, slugify, STARTER_TEX, FsBoundaryError } from "../services/projects";
 import { makePresence } from "../services/presence";
 
+function evictProjectRooms(projectId: number) {
+  return getRealtime()?.evictProject(projectId) ?? { rooms: 0, sidecars: 0 };
+}
+
+function finishProjectReset(db: Db, projectId: number) {
+  const epochBumped = db.fileEpochs.bumpAllInProject(projectId);
+  const evicted = evictProjectRooms(projectId);
+  return { epochBumped, evicted };
+}
+
 export function projectsRouter(cfg: Config, db: Db) {
   const r = Router();
   r.use(requireAuth(cfg, db));
@@ -99,6 +109,7 @@ export function projectsRouter(cfg: Config, db: Db) {
     const u = req.user!;
     const p = requireProjectAccess(db, u, Number(req.params.id), "owner", res);
     if (!p) return;
+    evictProjectRooms(p.id);
     db.projects.delete(p.id);
     await fs.rm(projectDir(cfg, p.owner_id, p.id), { recursive: true, force: true });
     res.json({ ok: true });
@@ -153,6 +164,7 @@ export function projectsRouter(cfg: Config, db: Db) {
     if (!p) return;
     const rel = typeof req.query.path === "string" ? req.query.path : "";
     if (!rel) return res.status(400).json({ error: "path required" });
+    res.set("Cache-Control", "no-store");
     res.json({ epoch: db.fileEpochs.get(p.id, rel) });
   });
 
@@ -220,17 +232,21 @@ export function projectsRouter(cfg: Config, db: Db) {
     if (info.isCurrentHead) {
       return res.status(409).json({ error: "already at last good compile" });
     }
-    const rt = getRealtime();
-    const evicted = rt ? rt.evictProject(p.id) : { rooms: 0, sidecars: 0 };
-    db.fileEpochs.bumpAllInProject(p.id);
+    // Retire rooms before the async git reset so none can flush stale text
+    // during it. finishProjectReset() bumps the generation and evicts again
+    // to catch any client that reconnects while git is running.
+    const preEvicted = evictProjectRooms(p.id);
     try {
       const result = await revertToCommit(root, info.hash, u);
+      const reset = finishProjectReset(db, p.id);
       db.log.info("revert to last good compile", {
         projectId: p.id, actor: u.username, target: result.newHead,
-        safetyTag: result.safetyTag, lastGoodTag: lastGoodCompileTagName(), ...evicted,
+        safetyTag: result.safetyTag, lastGoodTag: lastGoodCompileTagName(),
+        preEvicted, ...reset,
       });
-      res.json({ ok: true, ...result, evicted, target: info });
+      res.json({ ok: true, ...result, preEvicted, ...reset, target: info });
     } catch (err) {
+      finishProjectReset(db, p.id);
       res.status(400).json({ error: (err as Error).message });
     }
   });
@@ -243,10 +259,7 @@ export function projectsRouter(cfg: Config, db: Db) {
     const u = req.user!;
     const p = requireProjectAccess(db, u, Number(req.params.id), "owner", res);
     if (!p) return;
-    const rt = getRealtime();
-    if (!rt) return res.json({ ok: true, evicted: { rooms: 0, sidecars: 0 }, epochBumped: 0 });
-    const epochBumped = db.fileEpochs.bumpAllInProject(p.id);
-    const evicted = rt.evictProject(p.id);
+    const { epochBumped, evicted } = finishProjectReset(db, p.id);
     db.log.info("force-evict-sessions", { projectId: p.id, actor: u.username, ...evicted, epochBumped });
     res.json({ ok: true, evicted, epochBumped });
   });
@@ -257,17 +270,17 @@ export function projectsRouter(cfg: Config, db: Db) {
     const p = requireProjectAccess(db, u, Number(req.params.id), "owner", res);
     if (!p) return;
     const root = await ensureProjectDir(cfg, p.owner_id, p.id);
-    const rt = getRealtime();
-    const evicted = rt ? rt.evictProject(p.id) : { rooms: 0, sidecars: 0 };
-    db.fileEpochs.bumpAllInProject(p.id);
+    const preEvicted = evictProjectRooms(p.id);
     try {
       const result = await revertToCommit(root, req.params.hash, u);
+      const reset = finishProjectReset(db, p.id);
       db.log.info("project reverted", {
         projectId: p.id, actor: u.username, target: result.newHead,
-        safetyTag: result.safetyTag, ...evicted,
+        safetyTag: result.safetyTag, preEvicted, ...reset,
       });
-      res.json({ ok: true, ...result, evicted });
+      res.json({ ok: true, ...result, preEvicted, ...reset });
     } catch (err) {
+      finishProjectReset(db, p.id);
       res.status(400).json({ error: (err as Error).message });
     }
   });
@@ -409,7 +422,17 @@ export function projectsRouter(cfg: Config, db: Db) {
     if (proposal.status !== "open") return res.status(409).json({ error: `proposal is ${proposal.status}` });
 
     const projectRoot = await ensureProjectDir(cfg, p.owner_id, p.id);
-    const result = await mergeProposal(projectRoot, proposal.branch_name, u, proposal.title);
+    // The merge preserves current main-branch work, so materialise any
+    // debounced Yjs edits before git snapshots the working tree.
+    await getRealtime()?.flushAll();
+    const preEvicted = evictProjectRooms(p.id);
+    let result: Awaited<ReturnType<typeof mergeProposal>>;
+    try {
+      result = await mergeProposal(projectRoot, proposal.branch_name, u, proposal.title);
+    } finally {
+      const reset = finishProjectReset(db, p.id);
+      db.log.info("proposal merge: realtime reset", { projectId: p.id, preEvicted, ...reset });
+    }
     if (!result.ok) {
       db.projects.setProposalStatus(p.id, proposal.id, "conflicted");
       return res.status(409).json({ error: "merge conflict", details: result.conflict });

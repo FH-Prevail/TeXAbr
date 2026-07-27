@@ -127,6 +127,33 @@ const MIGRATIONS: Migration[] = [
       )`);
     },
   },
+  {
+    version: 8,
+    name: "project_epoch_baseline",
+    up: (db) => {
+      db.exec(`CREATE TABLE IF NOT EXISTS project_epoch (
+        project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+        epoch      INTEGER NOT NULL DEFAULT 1,
+        updated_at INTEGER NOT NULL
+      )`);
+
+      // Roll every existing project forward once during this migration. This
+      // deliberately retires sidecars created by the old epoch implementation,
+      // including files that only had the implicit epoch=1 and therefore had
+      // no row for bumpAllInProject() to update.
+      const now = Date.now();
+      db.prepare<[number]>(
+        `INSERT INTO project_epoch (project_id, epoch, updated_at)
+         SELECT id, 2, ? FROM projects
+         WHERE true
+         ON CONFLICT(project_id) DO UPDATE
+           SET epoch = project_epoch.epoch + 1, updated_at = excluded.updated_at`,
+      ).run(now);
+      db.prepare<[number]>(
+        `UPDATE file_epoch SET epoch = epoch + 1, updated_at = ?`,
+      ).run(now);
+    },
+  },
 ];
 
 export function migrate(raw: Database.Database, cfg: Config) {

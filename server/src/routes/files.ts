@@ -19,6 +19,7 @@ import {
 } from "../services/projects";
 import { ensureUserHasRoom, ensureProjectHasFileSlot } from "../services/quota";
 import { makeFileLock, type FileLockService } from "../services/fileLock";
+import { getRealtime } from "../services/realtime";
 
 let _fileLock: FileLockService | null = null;
 function fileLock(db: Db): FileLockService {
@@ -36,6 +37,26 @@ function lockClaim(db: Db, projectId: number, relPath: string, userId: number) {
   }
 }
 type LockHolderShape = { user_id: number; username: string | null; acquired_at: number; expires_at: number };
+
+function evictFileRooms(projectId: number, relPath: string) {
+  return getRealtime()?.evictFile(projectId, relPath) ?? { rooms: 0, sidecars: 0 };
+}
+
+function evictProjectRooms(projectId: number) {
+  return getRealtime()?.evictProject(projectId) ?? { rooms: 0, sidecars: 0 };
+}
+
+function finishFileMutation(db: Db, projectId: number, relPath: string) {
+  const epoch = db.fileEpochs.bump(projectId, relPath);
+  const evicted = evictFileRooms(projectId, relPath);
+  db.log.info("realtime: authoritative file mutation", { projectId, relPath, epoch, ...evicted });
+}
+
+function finishProjectMutation(db: Db, projectId: number) {
+  const epochBumped = db.fileEpochs.bumpAllInProject(projectId);
+  const evicted = evictProjectRooms(projectId);
+  db.log.info("realtime: authoritative project mutation", { projectId, epochBumped, ...evicted });
+}
 
 export function filesRouter(cfg: Config, db: Db) {
   const r = Router();
@@ -104,20 +125,23 @@ export function filesRouter(cfg: Config, db: Db) {
     if (typeof rel !== "string" || typeof content !== "string") {
       return res.status(400).json({ error: "path and content required" });
     }
+    let resetRealtime = false;
     try {
       const full = resolveSafe(root, rel);
       const bytes = Buffer.byteLength(content, "utf8");
       lockClaim(db, p.id, rel, u.id);
       await enforceWriteLimits(cfg, db, p.owner_id, root, full, bytes);
+      if (!target.proposal) {
+        // Retire the live room before the async filesystem/git work. A second
+        // eviction in finally catches clients that reconnect during the write.
+        evictFileRooms(p.id, rel);
+        resetRealtime = true;
+      }
       await fs.mkdir(path.dirname(full), { recursive: true });
       await fs.writeFile(full, content, "utf8");
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Edit ${rel}`, u);
-      // HTTP write happens outside the Yjs CRDT — the live room (if any)
-      // has no way to merge this content. Bumping the epoch retires the
-      // old room so the next reconnect rebuilds from the new disk bytes.
-      if (!target.proposal) db.fileEpochs.bump(p.id, rel);
       res.json({ ok: true });
     } catch (err) {
       if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });
@@ -126,6 +150,8 @@ export function filesRouter(cfg: Config, db: Db) {
         return res.status(tagged.status).json({ error: tagged.message, ...(tagged.held ? { held: tagged.held } : {}) });
       }
       throw err;
+    } finally {
+      if (resetRealtime) finishFileMutation(db, p.id, rel);
     }
   });
 
@@ -138,10 +164,16 @@ export function filesRouter(cfg: Config, db: Db) {
     const root = target.root;
     const rel = String(req.query.path ?? "");
     if (!rel) return res.status(400).json({ error: "path required" });
+    let resetRealtime = false;
     try {
       const full = resolveSafe(root, rel);
+      if (!target.proposal) {
+        // rel may be a directory, so retire the whole project rather than
+        // leaving rooms for deleted descendants alive.
+        evictProjectRooms(p.id);
+        resetRealtime = true;
+      }
       await fs.rm(full, { recursive: true, force: true });
-      if (!target.proposal) db.fileEpochs.bump(p.id, rel);
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Delete ${rel}`, u);
@@ -153,6 +185,8 @@ export function filesRouter(cfg: Config, db: Db) {
         return res.status(tagged.status).json({ error: tagged.message, ...(tagged.held ? { held: tagged.held } : {}) });
       }
       throw err;
+    } finally {
+      if (resetRealtime) finishProjectMutation(db, p.id);
     }
   });
 
@@ -193,16 +227,18 @@ export function filesRouter(cfg: Config, db: Db) {
     if (typeof from !== "string" || typeof to !== "string") {
       return res.status(400).json({ error: "from and to required" });
     }
+    let resetRealtime = false;
     try {
       const src = resolveSafe(root, from);
       const dst = resolveSafe(root, to);
+      if (!target.proposal) {
+        // from/to may be directories. A project reset guarantees every
+        // descendant room is retired and re-resolved at its new path.
+        evictProjectRooms(p.id);
+        resetRealtime = true;
+      }
       await fs.mkdir(path.dirname(dst), { recursive: true });
       await fs.rename(src, dst);
-      if (!target.proposal) {
-        // Source path no longer exists, destination needs a fresh room.
-        db.fileEpochs.bump(p.id, from);
-        db.fileEpochs.bump(p.id, to);
-      }
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Rename ${from} to ${to}`, u);
@@ -214,6 +250,8 @@ export function filesRouter(cfg: Config, db: Db) {
         return res.status(tagged.status).json({ error: tagged.message, ...(tagged.held ? { held: tagged.held } : {}) });
       }
       throw err;
+    } finally {
+      if (resetRealtime) finishProjectMutation(db, p.id);
     }
   });
 
@@ -228,6 +266,7 @@ export function filesRouter(cfg: Config, db: Db) {
     if (!Array.isArray(sources) || typeof destination !== "string") {
       return res.status(400).json({ error: "sources[] and destination required" });
     }
+    let resetRealtime = false;
     try {
       const dstDir = resolveSafe(root, destination);
       let addedBytes = 0;
@@ -237,6 +276,10 @@ export function filesRouter(cfg: Config, db: Db) {
       }
       await enforceProjectRoom(cfg, db, root, addedBytes);
       await ensureUserHasRoom(cfg, db, p.owner_id, addedBytes);
+      if (!target.proposal) {
+        evictProjectRooms(p.id);
+        resetRealtime = true;
+      }
       await fs.mkdir(dstDir, { recursive: true });
       for (const s of sources) {
         if (typeof s !== "string") continue;
@@ -247,7 +290,6 @@ export function filesRouter(cfg: Config, db: Db) {
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Copy files to ${destination}`, u);
-      if (!target.proposal) db.fileEpochs.bumpAllInProject(p.id);
       res.json({ ok: true });
     } catch (err) {
       if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });
@@ -256,6 +298,8 @@ export function filesRouter(cfg: Config, db: Db) {
         return res.status(tagged.status).json({ error: tagged.message, ...(tagged.held ? { held: tagged.held } : {}) });
       }
       throw err;
+    } finally {
+      if (resetRealtime) finishProjectMutation(db, p.id);
     }
   });
 
@@ -285,16 +329,20 @@ export function filesRouter(cfg: Config, db: Db) {
     const root = target.root;
     const rel = String(req.body.path ?? req.file?.originalname ?? "");
     if (!rel || !req.file) return res.status(400).json({ error: "file and path required" });
+    let resetRealtime = false;
     try {
       const full = resolveSafe(root, rel);
       lockClaim(db, p.id, rel, u.id);
       await enforceWriteLimits(cfg, db, p.owner_id, root, full, req.file.size);
+      if (!target.proposal) {
+        evictFileRooms(p.id, rel);
+        resetRealtime = true;
+      }
       await fs.mkdir(path.dirname(full), { recursive: true });
       await fs.writeFile(full, req.file.buffer);
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Upload ${rel}`, u);
-      if (!target.proposal) db.fileEpochs.bump(p.id, rel);
       res.json({ ok: true, path: rel });
     } catch (err) {
       if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });
@@ -303,6 +351,8 @@ export function filesRouter(cfg: Config, db: Db) {
         return res.status(tagged.status).json({ error: tagged.message, ...(tagged.held ? { held: tagged.held } : {}) });
       }
       throw err;
+    } finally {
+      if (resetRealtime) finishFileMutation(db, p.id, rel);
     }
   });
 

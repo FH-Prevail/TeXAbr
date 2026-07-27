@@ -48,12 +48,29 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
     let provider: WebsocketProvider | null = null;
     let ydoc: Y.Doc | null = null;
     let visibilityHandler: (() => void) | null = null;
+    let statusHandler: ((e: { status: "connected" | "disconnected" | "connecting" }) => void) | null = null;
+    let closeHandler: ((event: CloseEvent | null) => void) | null = null;
+    let restartTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleRestart = (delayMs: number) => {
+      if (cancelled || restartTimer) return;
+      restartTimer = setTimeout(() => {
+        restartTimer = null;
+        if (!cancelled) setEpochResetNonce((n) => n + 1);
+      }, delayMs);
+    };
 
     async function fetchEpoch(): Promise<number> {
       const url = `/api/projects/${projectId}/file-epoch?path=${encodeURIComponent(filePath!)}`;
-      const r = await fetch(url, { credentials: "include" });
+      // This value is a concurrency token, not cacheable document metadata.
+      // Reusing a cached epoch after a code-4000 close creates an infinite
+      // stale-epoch reconnect loop for exactly one file.
+      const r = await fetch(url, { credentials: "include", cache: "no-store" });
       if (!r.ok) throw new Error(`epoch fetch failed: ${r.status}`);
       const j = await r.json() as { epoch: number };
+      if (!Number.isInteger(j.epoch) || j.epoch < 1) {
+        throw new Error("epoch fetch returned an invalid generation");
+      }
       return j.epoch;
     }
 
@@ -62,9 +79,14 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
       try {
         epoch = await fetchEpoch();
       } catch {
-        // If the epoch endpoint is unreachable, fall back to 1 — matches the
-        // server's default-on-miss behavior so we don't deadlock the editor.
-        epoch = 1;
+        // Never guess epoch=1. Once a file has moved to a later generation,
+        // guessing guarantees the server will reject every reconnect. Stay
+        // read-only and retry with a small backoff instead.
+        if (!cancelled) {
+          setYText(null); setDoc(null); setAwareness(null); setStatus("disconnected");
+          scheduleRestart(1_500);
+        }
+        return;
       }
       if (cancelled) return;
 
@@ -84,27 +106,30 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
       setAwareness(provider.awareness);
       setStatus("connecting");
 
-      const onStatus = (e: { status: "connected" | "disconnected" | "connecting" }) => {
+      statusHandler = (e: { status: "connected" | "disconnected" | "connecting" }) => {
+        if (cancelled) return;
         setStatus(e.status === "connected" ? "connected" : e.status === "connecting" ? "connecting" : "disconnected");
       };
-      provider.on("status", onStatus);
+      provider.on("status", statusHandler);
 
       // Server close code 4000 means "this client's epoch is stale (or the
       // doc was reset)." Tear down the local Y.Doc + provider entirely and
       // bump epochResetNonce, which restarts this effect from scratch. The
       // fresh effect run refetches the epoch and builds a new room.
-      const onClose = (event: CloseEvent | null) => {
-        if (event?.code !== 4000) return;
-        provider?.off("status", onStatus);
-        provider?.off("connection-close", onClose);
+      closeHandler = (event: CloseEvent | null) => {
+        if (cancelled || event?.code !== 4000) return;
+        if (statusHandler) provider?.off("status", statusHandler);
+        if (closeHandler) provider?.off("connection-close", closeHandler);
         try { provider?.disconnect(); } catch { /* already disconnected */ }
         try { provider?.destroy(); } catch { /* already destroyed */ }
         try { ydoc?.destroy(); } catch { /* already destroyed */ }
         providerRef.current = null;
         setYText(null); setDoc(null); setAwareness(null); setStatus("disconnected");
-        setEpochResetNonce((n) => n + 1);
+        // Yield briefly so a server-authoritative filesystem operation can
+        // finish its final epoch bump before this tab asks for the new value.
+        scheduleRestart(150);
       };
-      provider.on("connection-close", onClose);
+      provider.on("connection-close", closeHandler);
 
       // Pause WS while the tab is backgrounded (Chrome throttles WS heartbeats,
       // which used to flap reconnects and leak React state). Resume on visible.
@@ -121,7 +146,10 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
 
     return () => {
       cancelled = true;
+      if (restartTimer) clearTimeout(restartTimer);
       if (visibilityHandler) document.removeEventListener("visibilitychange", visibilityHandler);
+      if (statusHandler) provider?.off("status", statusHandler);
+      if (closeHandler) provider?.off("connection-close", closeHandler);
       try { provider?.disconnect(); } catch { /* already disconnected */ }
       try { provider?.destroy(); } catch { /* already destroyed */ }
       try { ydoc?.destroy(); } catch { /* already destroyed */ }

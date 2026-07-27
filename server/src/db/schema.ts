@@ -156,6 +156,24 @@ CREATE TABLE IF NOT EXISTS user_project_state (
   PRIMARY KEY (user_id, project_id)
 );
 
+-- Project baseline plus optional per-file overrides for Yjs document
+-- generations. A project-wide reset increments both the baseline and every
+-- existing override, so even files that never needed an override before are
+-- moved to a new generation.
+CREATE TABLE IF NOT EXISTS project_epoch (
+  project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  epoch      INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS file_epoch (
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  rel_path   TEXT NOT NULL,
+  epoch      INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (project_id, rel_path)
+);
+
 CREATE INDEX IF NOT EXISTS idx_file_locks_user ON file_locks(user_id);
 CREATE INDEX IF NOT EXISTS idx_file_locks_expiry ON file_locks(expires_at);
 

@@ -57,6 +57,9 @@ export interface RoomKey {
 
 interface Room {
   key: string;
+  projectId: number;
+  relPath: string;
+  epoch: number;
   doc: Y.Doc;
   awareness: awarenessProtocol.Awareness;
   clients: Set<WebSocket>;
@@ -70,6 +73,10 @@ interface Room {
   // Pending destruction after a grace period when the last client left.
   // Cancelled if any client rejoins within GRACE_PERIOD_MS.
   graceTimer: NodeJS.Timeout | null;
+  // Set before an authoritative reset closes sockets. Retired rooms must
+  // never flush again: their delayed WebSocket "close" events used to write
+  // stale CRDT text back over an upload/revert after eviction.
+  retired: boolean;
   log: Logger;
 }
 
@@ -85,6 +92,9 @@ export interface RealtimeService {
   // button. Combined with an epoch bump (by the caller), this guarantees
   // surviving stale clients can't reconnect into the new epoch's room.
   evictProject(projectId: number): { rooms: number; sidecars: number };
+  // Targeted variant used by HTTP overwrite/upload. All generations for this
+  // path are discarded so flushBeforeCompile cannot select a stale room.
+  evictFile(projectId: number, relPath: string): { rooms: number; sidecars: number };
   // Persist every room's in-memory Y.Doc to disk (plain text + sidecar)
   // before the process exits. Called from the shutdown drain so the
   // last 2s window of typing doesn't get lost on systemctl restart.
@@ -104,9 +114,9 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   // (Pre-epoch lockout map removed — epoch validation in index.ts is the
   // sole gate for "stale tab tries to merge into wrong doc generation.")
 
-  function createRoom(key: string, filePath: string, epoch: number, log: Logger): Room {
+  function createRoom(key: string, filePath: string, roomKey: RoomKey, log: Logger): Room {
     const doc = new Y.Doc();
-    const scPath = sidecarPathFor(cfg, filePath, epoch);
+    const scPath = sidecarPathFor(cfg, filePath, roomKey.epoch);
 
     // Hydration order: binary CRDT sidecar first (preserves the full doc
     // history so a reconnecting client's local CRDT items merge cleanly
@@ -133,6 +143,9 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     const awareness = new awarenessProtocol.Awareness(doc);
     const room: Room = {
       key,
+      projectId: roomKey.projectId,
+      relPath: roomKey.relPath,
+      epoch: roomKey.epoch,
       doc,
       awareness,
       clients: new Set(),
@@ -141,6 +154,7 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
       sidecarPath: scPath,
       saveTimer: null,
       graceTimer: null,
+      retired: false,
       log,
     };
 
@@ -179,6 +193,7 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   }
 
   function scheduleSave(room: Room) {
+    if (room.retired) return;
     if (room.saveTimer) clearTimeout(room.saveTimer);
     room.saveTimer = setTimeout(() => {
       void saveNow(room);
@@ -186,6 +201,10 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   }
 
   async function saveNow(room: Room) {
+    // An eviction is a server-authoritative boundary. A socket's asynchronous
+    // close event may arrive after destroyRoom(), but it must not resurrect
+    // the retired sidecar or overwrite the authoritative disk bytes.
+    if (room.retired) return;
     if (room.saveTimer) {
       clearTimeout(room.saveTimer);
       room.saveTimer = null;
@@ -213,6 +232,7 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   }
 
   function scheduleDestroy(room: Room) {
+    if (room.retired) return;
     if (room.graceTimer) clearTimeout(room.graceTimer);
     room.log.info("realtime: room idle, scheduling destruction", {
       key: room.key, graceMs: GRACE_PERIOD_MS,
@@ -241,6 +261,7 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
 
   function destroyRoom(room: Room) {
     rooms.delete(room.key);
+    room.retired = true;
     // awareness.destroy() unregisters timers and listeners; do it first so
     // the doc destruction below can't leave dangling awareness state.
     try { room.awareness.destroy(); } catch { /* already destroyed */ }
@@ -255,7 +276,7 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     const k = keyOf(key);
     let room = rooms.get(k);
     if (!room) {
-      room = createRoom(k, filePath, key.epoch, log.child({ room: k }));
+      room = createRoom(k, filePath, key, log.child({ room: k }));
       rooms.set(k, room);
       room.log.info("realtime: room opened", { filePath, epoch: key.epoch });
     } else {
@@ -270,6 +291,7 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     // Awareness uses Y.Doc clientID; each connection gets its own, set by
     // the client when it pushes its first awareness state.
     ws.on("message", (data: Buffer) => {
+      if (room!.retired) return;
       try {
         const arr = new Uint8Array(data);
         const decoder = decoding.createDecoder(arr);
@@ -322,6 +344,10 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
 
     ws.on("close", () => {
       room!.clients.delete(ws);
+      if (room!.retired) {
+        room!.clientIds.delete(ws);
+        return;
+      }
       const ids = room!.clientIds.get(ws);
       if (ids && ids.size > 0) {
         awarenessProtocol.removeAwarenessStates(room!.awareness, Array.from(ids), "disconnect");
@@ -359,21 +385,23 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     }
   }
 
-  function evictProject(projectId: number): { rooms: number; sidecars: number } {
+  function evictRooms(
+    matches: (room: Room) => boolean,
+    closeReason: string,
+  ): { rooms: number; sidecars: number } {
     let rooms_evicted = 0;
     let sidecars_removed = 0;
-    const prefix = `${projectId}:`;
-    const victims: Room[] = [];
-    for (const room of rooms.values()) {
-      if (room.key.startsWith(prefix)) victims.push(room);
-    }
+    const victims = Array.from(rooms.values()).filter(matches);
     for (const room of victims) {
+      // Mark retired before calling ws.close(): fake/test sockets may emit
+      // "close" synchronously and real sockets emit it later.
+      room.retired = true;
       // Cancel any pending grace-destroy timer so we don't double-fire.
       if (room.graceTimer) { clearTimeout(room.graceTimer); room.graceTimer = null; }
       if (room.saveTimer) { clearTimeout(room.saveTimer); room.saveTimer = null; }
       // Close any attached sockets so clients reconnect into the fresh room.
       for (const ws of room.clients) {
-        try { ws.close(4000, "project reverted"); } catch { /* already closed */ }
+        try { ws.close(4000, closeReason); } catch { /* already closed */ }
       }
       // Drop the sidecar so the next open hydrates from disk (= the new
       // post-revert content), not from the pre-revert CRDT state.
@@ -389,8 +417,22 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     // the old one. The pre-bump sidecars are dead data on disk; a periodic
     // cleanup job (GC of any sidecar whose epoch is < current) can reap
     // them. We never accidentally re-merge a stale CRDT through them.
-    rootLog.info("realtime: project evicted", { projectId, rooms: rooms_evicted, sidecars: sidecars_removed });
     return { rooms: rooms_evicted, sidecars: sidecars_removed };
+  }
+
+  function evictProject(projectId: number): { rooms: number; sidecars: number } {
+    const result = evictRooms((room) => room.projectId === projectId, "project reset");
+    rootLog.info("realtime: project evicted", { projectId, ...result });
+    return result;
+  }
+
+  function evictFile(projectId: number, relPath: string): { rooms: number; sidecars: number } {
+    const result = evictRooms(
+      (room) => room.projectId === projectId && room.relPath === relPath,
+      "file reset",
+    );
+    rootLog.info("realtime: file evicted", { projectId, relPath, ...result });
+    return result;
   }
 
   async function flushAll(): Promise<void> {
@@ -399,7 +441,7 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     // and the binary CRDT sidecar (so the next boot can rehydrate the doc
     // with item-IDs intact, instead of re-seeding from text and creating
     // the fresh-IDs-vs-old-client-IDs duplication trap we used to hit).
-    const all = Array.from(rooms.values());
+    const all = Array.from(rooms.values()).filter((room) => !room.retired);
     rootLog.info("realtime: flushAll start", { rooms: all.length });
     await Promise.allSettled(all.map((room) => saveNow(room)));
     rootLog.info("realtime: flushAll done");
@@ -409,12 +451,13 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     // Find any room that backs this file and flush it. Lookup is by absolute
     // path since the room key is project-scoped while the compile flow knows
     // only the resolved fs path.
-    for (const room of rooms.values()) {
-      if (room.filePath === filePath) {
-        await saveNow(room);
-        return;
-      }
-    }
+    // A correctly retired generation is removed immediately. Choosing the
+    // highest epoch is an additional guard for rooms created by an older
+    // bundle before an in-place deploy.
+    const current = Array.from(rooms.values())
+      .filter((room) => !room.retired && room.filePath === filePath)
+      .sort((a, b) => b.epoch - a.epoch)[0];
+    if (current) await saveNow(current);
   }
 
   function status() {
@@ -424,7 +467,7 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   }
 
   rootLog.info("realtime: service ready");
-  return { handleConnection, flushBeforeCompile, evictProject, flushAll, status };
+  return { handleConnection, flushBeforeCompile, evictProject, evictFile, flushAll, status };
 }
 
 // Module-level singleton so the compile flow can call flushBeforeCompile()
