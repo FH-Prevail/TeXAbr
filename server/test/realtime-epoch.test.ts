@@ -186,3 +186,44 @@ test("closing a stale room cannot recreate a file deleted on disk", async () => 
   realtime.evictFile(12, "deleted.tex");
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
+
+test("project flush persists the merged CRDT instead of a browser snapshot", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "texabr-flush-test-"));
+  const filePath = path.join(dataDir, "projects", "1", "21", "shared.tex");
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, "", "utf8");
+
+  const realtime = makeRealtime(silentLog, testConfig(dataDir));
+  const socketA = new FakeSocket();
+  const socketB = new FakeSocket();
+  realtime.handleConnection(
+    socketA as unknown as WebSocket,
+    filePath,
+    { projectId: 21, relPath: "shared.tex", epoch: 1 },
+    silentLog,
+  );
+  realtime.handleConnection(
+    socketB as unknown as WebSocket,
+    filePath,
+    { projectId: 21, relPath: "shared.tex", epoch: 1 },
+    silentLog,
+  );
+
+  for (const [socket, value] of [[socketA, "A"], [socketB, "B"]] as const) {
+    const client = new Y.Doc();
+    client.getText("content").insert(0, value);
+    const enc = encoding.createEncoder();
+    encoding.writeVarUint(enc, 0);
+    syncProtocol.writeUpdate(enc, Y.encodeStateAsUpdate(client));
+    socket.emit("message", Buffer.from(encoding.toUint8Array(enc)));
+    client.destroy();
+  }
+
+  assert.deepEqual(await realtime.flushProject(21), { rooms: 1 });
+  const persisted = fs.readFileSync(filePath, "utf8");
+  assert.equal(persisted.length, 2);
+  assert.deepEqual(new Set(persisted), new Set(["A", "B"]));
+
+  realtime.evictProject(21);
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});

@@ -99,6 +99,10 @@ export interface RealtimeService {
   // before the process exits. Called from the shutdown drain so the
   // last 2s window of typing doesn't get lost on systemctl restart.
   flushAll(): Promise<void>;
+  // Persist every live room for one project. Browser Save/Save All uses this
+  // instead of uploading whole-file snapshots that could overwrite edits
+  // already merged into the server's CRDT.
+  flushProject(projectId: number): Promise<{ rooms: number }>;
   // Inspect: how many rooms are live (admin diagnostics).
   status(): { rooms: number; clients: number };
 }
@@ -460,6 +464,15 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
     rootLog.info("realtime: flushAll done");
   }
 
+  async function flushProject(projectId: number): Promise<{ rooms: number }> {
+    const current = Array.from(rooms.values())
+      .filter((room) => !room.retired && room.projectId === projectId);
+    rootLog.info("realtime: flushProject start", { projectId, rooms: current.length });
+    await Promise.all(current.map((room) => saveNow(room)));
+    rootLog.info("realtime: flushProject done", { projectId, rooms: current.length });
+    return { rooms: current.length };
+  }
+
   async function flushBeforeCompile(filePath: string): Promise<void> {
     // Find any room that backs this file and flush it. Lookup is by absolute
     // path since the room key is project-scoped while the compile flow knows
@@ -480,7 +493,15 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
   }
 
   rootLog.info("realtime: service ready");
-  return { handleConnection, flushBeforeCompile, evictProject, evictFile, flushAll, status };
+  return {
+    handleConnection,
+    flushBeforeCompile,
+    flushProject,
+    evictProject,
+    evictFile,
+    flushAll,
+    status,
+  };
 }
 
 // Module-level singleton so the compile flow can call flushBeforeCompile()

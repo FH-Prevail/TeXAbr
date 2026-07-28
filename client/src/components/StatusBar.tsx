@@ -6,6 +6,7 @@ interface StatusBarProps {
   autoSave: boolean;
   onToggleAutoCompile: () => void;
   onToggleAutoSave: () => void;
+  collaborativeSync?: boolean;
   statusMessage?: string;
 }
 
@@ -14,19 +15,23 @@ const StatusBar: React.FC<StatusBarProps> = ({
   autoSave,
   onToggleAutoCompile,
   onToggleAutoSave,
+  collaborativeSync = false,
   statusMessage,
 }) => {
   return (
     <div className="status-bar">
       <div className="status-bar-left">
         <button
-          className={`status-item ${autoSave ? 'active' : 'inactive'}`}
+          className={`status-item ${(collaborativeSync || autoSave) ? 'active' : 'inactive'}`}
           onClick={onToggleAutoSave}
-          title={`Auto Save is ${autoSave ? 'ON' : 'OFF'} - Click to toggle`}
+          disabled={collaborativeSync}
+          title={collaborativeSync
+            ? 'Live collaboration is persisted automatically by the server'
+            : `Auto Save is ${autoSave ? 'ON' : 'OFF'} - Click to toggle`}
         >
-          <span className="status-label">Auto Save:</span>
-          <span className={`status-value ${autoSave ? 'on' : 'off'}`}>
-            {autoSave ? 'ON' : 'OFF'}
+          <span className="status-label">{collaborativeSync ? 'Live Sync:' : 'Auto Save:'}</span>
+          <span className={`status-value ${(collaborativeSync || autoSave) ? 'on' : 'off'}`}>
+            {(collaborativeSync || autoSave) ? 'ON' : 'OFF'}
           </span>
         </button>
         <button

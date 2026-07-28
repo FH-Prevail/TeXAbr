@@ -90,6 +90,8 @@ export const api = {
     evictSessions: (id: number) =>
       call<{ ok: true; evicted: { rooms: number; sidecars: number }; epochBumped: number }>(
         "POST", `/api/projects/${id}/evict-sessions`),
+    flushRealtime: (id: number) =>
+      call<{ ok: true; rooms: number }>("POST", `/api/projects/${id}/flush-realtime`),
     presence: (id: number) => call<{ users: PresenceUser[] }>("GET", `/api/projects/${id}/presence`),
     heartbeat: (id: number) => call<{ ok: true }>("POST", `/api/projects/${id}/presence`),
     getState:  (id: number) => call<{ state: ProjectUiState | null }>("GET", `/api/projects/${id}/state`),

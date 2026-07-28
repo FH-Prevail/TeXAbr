@@ -86,6 +86,21 @@ export function projectsRouter(cfg: Config, db: Db) {
     subscribeToProjectEvents(req, res, p.id);
   });
 
+  // Persist the server-owned CRDT state for every live file in this project.
+  // Collaborative clients call this for Save/Save All; accepting browser
+  // snapshots here would reintroduce last-writer-wins data loss.
+  r.post("/:id/flush-realtime", async (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "editor", res);
+    if (!p) return;
+    const realtime = getRealtime();
+    const result = realtime
+      ? await realtime.flushProject(p.id)
+      : { rooms: 0 };
+    db.projects.touch(p.id);
+    res.json({ ok: true, ...result });
+  });
+
   r.patch("/:id", (req, res) => {
     const u = req.user!;
     const p = requireProjectAccess(db, u, Number(req.params.id), "editor", res);

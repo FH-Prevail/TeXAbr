@@ -1380,7 +1380,12 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
                     // the Yjs room is the source of truth and the compile
                     // path explicitly flushes the room to disk just before
                     // pdflatex runs (services/latex.ts).
-                    if (autoSave && currentFile && !currentFile.isDirectory && !isCurrentFileRealtime) {
+                    if (
+                        activeProposalId != null
+                        && autoSave
+                        && currentFile
+                        && !currentFile.isDirectory
+                    ) {
                         const api = (window as any).api;
                         await api.writeFile(currentFile.path, content);
                     }
@@ -1393,16 +1398,32 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
         if (!isCurrentFileLatex) {
             return;
         }
-        // Same as the autosave path: when realtime is bound, the server-side
-        // flushBeforeCompile takes care of getting the latest CRDT bytes onto
-        // disk just before pdflatex starts. HTTP writeFile would dual-write
-        // a stale snapshot.
-        if (!isReadOnlyProject && !isCurrentFileRealtime && currentFile && !currentFile.isDirectory) {
+        if (activeProposalId == null && realtimeFilePath && !isCurrentFileRealtime) {
+            showNotification(
+                'Sync Pending',
+                'Wait for the collaborative connection before compiling so the server uses the latest merged text.',
+                'info',
+            );
+            return;
+        }
+        // Proposal worktrees do not use Yjs yet. Shared-main compilation
+        // always flushes the server-owned CRDT in services/latex.ts.
+        if (!isReadOnlyProject && activeProposalId != null && currentFile && !currentFile.isDirectory) {
             const api = (window as any).api;
             await api.writeFile(currentFile.path, editorContent);
         }
         triggerCompile();
-    }, [currentFile, editorContent, isCurrentFileLatex, isReadOnlyProject, isCurrentFileRealtime, triggerCompile]);
+    }, [
+        activeProposalId,
+        currentFile,
+        editorContent,
+        isCurrentFileLatex,
+        isCurrentFileRealtime,
+        isReadOnlyProject,
+        realtimeFilePath,
+        showNotification,
+        triggerCompile,
+    ]);
 
     const handleSaveCurrentFile = useCallback(async () => {
         if (isReadOnlyProject) {
@@ -1415,11 +1436,17 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
         }
 
         try {
-            if (isCurrentFileRealtime) {
-                // The Yjs room is the source of truth; the server's debounced
-                // flush writes to disk on its own and a manual Ctrl+S just
-                // confirms the state is synced.
-                showNotification('Synced', `${currentFile.name} is collaborating in real time`, 'success');
+            if (activeProposalId == null) {
+                if (!isCurrentFileRealtime) {
+                    showNotification(
+                        'Sync Pending',
+                        'The collaborative connection is reconnecting. No browser snapshot was written.',
+                        'info',
+                    );
+                    return;
+                }
+                await httpApi.projects.flushRealtime(projectId);
+                showNotification('Synced', `${currentFile.name} was persisted from the shared document`, 'success');
                 return;
             }
             const api = (window as any).api;
@@ -1428,7 +1455,15 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
         } catch (error) {
             showNotification('Save Failed', `Failed to save ${currentFile.name}: ${error}`, 'error');
         }
-    }, [currentFile, editorContent, isReadOnlyProject, isCurrentFileRealtime, showNotification]);
+    }, [
+        activeProposalId,
+        currentFile,
+        editorContent,
+        isCurrentFileRealtime,
+        isReadOnlyProject,
+        projectId,
+        showNotification,
+    ]);
 
     const handleSaveAllFiles = useCallback(async () => {
         if (isReadOnlyProject) {
@@ -1441,6 +1476,24 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
         }
 
         try {
+            if (activeProposalId == null) {
+                if (realtimeFilePath && !isCurrentFileRealtime) {
+                    showNotification(
+                        'Sync Pending',
+                        'The collaborative connection is reconnecting. No stale browser snapshots were written.',
+                        'info',
+                    );
+                    return;
+                }
+                const result = await httpApi.projects.flushRealtime(projectId);
+                showNotification(
+                    'Shared Project Synced',
+                    `Persisted ${result.rooms} live collaborative file${result.rooms === 1 ? '' : 's'} from the server`,
+                    'success',
+                );
+                return;
+            }
+
             const api = (window as any).api;
             let savedCount = 0;
 
@@ -1462,7 +1515,18 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
         } catch (error) {
             showNotification('Save Failed', `Failed to save files: ${error}`, 'error');
         }
-    }, [currentFile, editorContent, isReadOnlyProject, openTabs, tabContents, showNotification]);
+    }, [
+        activeProposalId,
+        currentFile,
+        editorContent,
+        isCurrentFileRealtime,
+        isReadOnlyProject,
+        openTabs,
+        projectId,
+        realtimeFilePath,
+        showNotification,
+        tabContents,
+    ]);
 
     const showStatusMessage = useCallback((message: string, duration: number = 4000) => {
         if (statusMessageTimeoutRef.current) {
@@ -1666,7 +1730,10 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
     }, [isCurrentFileLatex, handleCompile, handleSaveCurrentFile, handleSaveAllFiles, handleVersionFreeze, handleForwardSearch]);
     // Auto-save effect
     useEffect(() => {
-        if (!autoSave || isReadOnlyProject || !projectPath)
+        // Shared-main content is persisted by the server-owned Yjs rooms
+        // after every merged update. This legacy whole-file timer is retained
+        // only for isolated proposal worktrees, which do not use Yjs yet.
+        if (activeProposalId == null || !autoSave || isReadOnlyProject || !projectPath)
             return;
         const autoSaveInterval = setInterval(async () => {
             const api = (window as any).api;
@@ -1714,7 +1781,7 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
             }
         }, 60000); // 1 minute = 60000ms
         return () => clearInterval(autoSaveInterval);
-    }, [autoSave, isReadOnlyProject, projectPath, tabContents, currentFile, editorContent]);
+    }, [activeProposalId, autoSave, isReadOnlyProject, projectPath, tabContents, currentFile, editorContent]);
 
     const handleCreateProposal = useCallback(async () => {
         if (projectInfo?.access_role === 'reader') {
@@ -1794,8 +1861,8 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
             themePreference={themePreference}
             resolvedTheme={resolvedTheme}
             onThemeChange={handleThemeChange}
-            onToggleAutoSave={toggleAutoSave}
-            isAutoSaveEnabled={autoSave}
+            onToggleAutoSave={activeProposalId == null ? undefined : toggleAutoSave}
+            isAutoSaveEnabled={activeProposalId == null || autoSave}
             onShowAbout={() => setShowAboutDialog(true)}
         />
         <Toolbar
@@ -1983,6 +2050,7 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
             autoSave={autoSave}
             onToggleAutoCompile={toggleAutoCompile}
             onToggleAutoSave={toggleAutoSave}
+            collaborativeSync={activeProposalId == null}
             statusMessage={statusMessage}
         />
     </div>
