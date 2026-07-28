@@ -25,6 +25,7 @@ import {
 import { getRealtime } from "../services/realtime";
 import { ensureProjectDir, projectDir, resolveSafe, slugify, STARTER_TEX, FsBoundaryError } from "../services/projects";
 import { makePresence } from "../services/presence";
+import { publishProjectEvent, subscribeToProjectEvents } from "../services/projectEvents";
 
 function evictProjectRooms(projectId: number) {
   return getRealtime()?.evictProject(projectId) ?? { rooms: 0, sidecars: 0 };
@@ -76,6 +77,13 @@ export function projectsRouter(cfg: Config, db: Db) {
     const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
     if (!p) return;
     res.json({ project: p });
+  });
+
+  r.get("/:id/events", (req, res) => {
+    const u = req.user!;
+    const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
+    if (!p) return;
+    subscribeToProjectEvents(req, res, p.id);
   });
 
   r.patch("/:id", (req, res) => {
@@ -158,13 +166,21 @@ export function projectsRouter(cfg: Config, db: Db) {
   // Per-file epoch lookup. Clients call this once before opening a Yjs WS
   // so they can tag the upgrade URL with ?epoch=N. Reader access is enough
   // (epoch is just a generation counter, not a secret).
-  r.get("/:id/file-epoch", (req, res) => {
+  r.get("/:id/file-epoch", async (req, res) => {
     const u = req.user!;
     const p = requireProjectAccess(db, u, Number(req.params.id), "reader", res);
     if (!p) return;
     const rel = typeof req.query.path === "string" ? req.query.path : "";
     if (!rel) return res.status(400).json({ error: "path required" });
     res.set("Cache-Control", "no-store");
+    try {
+      const root = await ensureProjectDir(cfg, p.owner_id, p.id);
+      const stat = await fs.stat(resolveSafe(root, rel));
+      if (!stat.isFile()) return res.status(404).json({ error: "file not found" });
+    } catch (err) {
+      if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });
+      return res.status(404).json({ error: "file not found" });
+    }
     res.json({ epoch: db.fileEpochs.get(p.id, rel) });
   });
 
@@ -244,6 +260,7 @@ export function projectsRouter(cfg: Config, db: Db) {
         safetyTag: result.safetyTag, lastGoodTag: lastGoodCompileTagName(),
         preEvicted, ...reset,
       });
+      publishProjectEvent(p.id, { type: "resync" });
       res.json({ ok: true, ...result, preEvicted, ...reset, target: info });
     } catch (err) {
       finishProjectReset(db, p.id);
@@ -278,6 +295,7 @@ export function projectsRouter(cfg: Config, db: Db) {
         projectId: p.id, actor: u.username, target: result.newHead,
         safetyTag: result.safetyTag, preEvicted, ...reset,
       });
+      publishProjectEvent(p.id, { type: "resync" });
       res.json({ ok: true, ...result, preEvicted, ...reset });
     } catch (err) {
       finishProjectReset(db, p.id);
@@ -440,6 +458,7 @@ export function projectsRouter(cfg: Config, db: Db) {
 
     db.projects.setProposalStatus(p.id, proposal.id, "merged");
     db.projects.touch(p.id);
+    publishProjectEvent(p.id, { type: "resync" });
     await removeProposalWorktree(projectRoot, proposal.worktree_path).catch(() => {});
     await deleteBranch(projectRoot, proposal.branch_name).catch(() => {});
     res.json({ proposal: db.projects.findProposal(p.id, proposal.id) });

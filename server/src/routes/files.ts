@@ -20,6 +20,7 @@ import {
 import { ensureUserHasRoom, ensureProjectHasFileSlot } from "../services/quota";
 import { makeFileLock, type FileLockService } from "../services/fileLock";
 import { getRealtime } from "../services/realtime";
+import { publishProjectEvent } from "../services/projectEvents";
 
 let _fileLock: FileLockService | null = null;
 function fileLock(db: Db): FileLockService {
@@ -76,6 +77,7 @@ export function filesRouter(cfg: Config, db: Db) {
     const p = res.locals.project as ProjectWithAccess;
     const target = await resolveRequestRoot(cfg, db, req, res, p, false);
     if (!target) return;
+    res.set("Cache-Control", "no-store");
     res.json({ tree: await listTree(target.root) });
   });
 
@@ -121,13 +123,28 @@ export function filesRouter(cfg: Config, db: Db) {
     const target = await resolveRequestRoot(cfg, db, req, res, p, true);
     if (!target) return;
     const root = target.root;
-    const { path: rel, content } = req.body ?? {};
+    const { path: rel, content, create } = req.body ?? {};
     if (typeof rel !== "string" || typeof content !== "string") {
       return res.status(400).json({ error: "path and content required" });
     }
     let resetRealtime = false;
+    let created = false;
+    let existingHandle: Awaited<ReturnType<typeof fs.open>> | null = null;
     try {
       const full = resolveSafe(root, rel);
+      try {
+        const stat = await fs.stat(full);
+        if (!stat.isFile()) return res.status(400).json({ error: "path is not a file" });
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT") throw err;
+        if (create !== true) {
+          // A save is not a create. This is the server-side fence that keeps
+          // stale tabs/autosave requests from resurrecting a deleted path.
+          return res.status(404).json({ error: "file no longer exists" });
+        }
+        created = true;
+      }
       const bytes = Buffer.byteLength(content, "utf8");
       lockClaim(db, p.id, rel, u.id);
       await enforceWriteLimits(cfg, db, p.owner_id, root, full, bytes);
@@ -137,20 +154,35 @@ export function filesRouter(cfg: Config, db: Db) {
         evictFileRooms(p.id, rel);
         resetRealtime = true;
       }
-      await fs.mkdir(path.dirname(full), { recursive: true });
-      await fs.writeFile(full, content, "utf8");
+      if (created) {
+        await fs.mkdir(path.dirname(full), { recursive: true });
+        await fs.writeFile(full, content, "utf8");
+      } else {
+        // Open without O_CREAT. Even if a concurrent delete unlinks the path
+        // after this succeeds, writing this handle cannot put the name back.
+        existingHandle = await fs.open(full, "r+");
+        await existingHandle.truncate(0);
+        await existingHandle.writeFile(content, "utf8");
+        await existingHandle.close();
+        existingHandle = null;
+      }
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Edit ${rel}`, u);
+      if (!target.proposal && created) publishProjectEvent(p.id, { type: "upsert", path: rel });
       res.json({ ok: true });
     } catch (err) {
       if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return res.status(404).json({ error: "file no longer exists" });
+      }
       const tagged = err as Error & { status?: number; held?: LockHolderShape };
       if (tagged.status) {
         return res.status(tagged.status).json({ error: tagged.message, ...(tagged.held ? { held: tagged.held } : {}) });
       }
       throw err;
     } finally {
+      await existingHandle?.close().catch(() => {});
       if (resetRealtime) finishFileMutation(db, p.id, rel);
     }
   });
@@ -177,6 +209,7 @@ export function filesRouter(cfg: Config, db: Db) {
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Delete ${rel}`, u);
+      if (!target.proposal) publishProjectEvent(p.id, { type: "delete", path: rel });
       res.json({ ok: true });
     } catch (err) {
       if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });
@@ -205,6 +238,7 @@ export function filesRouter(cfg: Config, db: Db) {
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Create directory ${rel}`, u);
+      if (!target.proposal) publishProjectEvent(p.id, { type: "upsert", path: rel });
       res.json({ ok: true });
     } catch (err) {
       if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });
@@ -242,6 +276,7 @@ export function filesRouter(cfg: Config, db: Db) {
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Rename ${from} to ${to}`, u);
+      if (!target.proposal) publishProjectEvent(p.id, { type: "rename", path: from, to });
       res.json({ ok: true });
     } catch (err) {
       if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });
@@ -290,6 +325,7 @@ export function filesRouter(cfg: Config, db: Db) {
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Copy files to ${destination}`, u);
+      if (!target.proposal) publishProjectEvent(p.id, { type: "resync" });
       res.json({ ok: true });
     } catch (err) {
       if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });
@@ -343,6 +379,7 @@ export function filesRouter(cfg: Config, db: Db) {
       db.projects.touch(p.id);
       if (target.proposal) db.projects.touchProposal(p.id, target.proposal.id);
       await commitProject(root, `Upload ${rel}`, u);
+      if (!target.proposal) publishProjectEvent(p.id, { type: "upsert", path: rel });
       res.json({ ok: true, path: rel });
     } catch (err) {
       if (err instanceof FsBoundaryError) return res.status(400).json({ error: err.message });

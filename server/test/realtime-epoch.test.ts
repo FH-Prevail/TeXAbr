@@ -162,3 +162,27 @@ test("an evicted room cannot save stale text from its delayed close event", asyn
   staleClient.destroy();
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
+
+test("closing a stale room cannot recreate a file deleted on disk", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "texabr-delete-test-"));
+  const filePath = path.join(dataDir, "projects", "1", "12", "deleted.tex");
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, "delete me", "utf8");
+
+  const realtime = makeRealtime(silentLog, testConfig(dataDir));
+  const socket = new FakeSocket();
+  realtime.handleConnection(
+    socket as unknown as WebSocket,
+    filePath,
+    { projectId: 12, relPath: "deleted.tex", epoch: 1 },
+    silentLog,
+  );
+
+  fs.rmSync(filePath);
+  socket.finishClose();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(fs.existsSync(filePath), false);
+  realtime.evictFile(12, "deleted.tex");
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});

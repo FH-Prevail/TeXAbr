@@ -22,6 +22,9 @@ async function call<T>(method: string, url: string, body?: unknown): Promise<T> 
     method,
     headers,
     credentials: "include",
+    // API GETs are live project state, not static assets. Browser/proxy cache
+    // reuse can otherwise make a successfully deleted file remain visible.
+    cache: SAFE_METHODS.has(method) ? "no-store" : "default",
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 
@@ -113,8 +116,8 @@ export const api = {
         "GET",
         `/api/files/${id}/content?path=${encodeURIComponent(path)}${proposalParam(proposalId)}`,
       ),
-    write:   (id: number, path: string, content: string, proposalId?: number | null) =>
-      call<{ ok: true }>("PUT", `/api/files/${id}/content`, { path, content, proposalId }),
+    write:   (id: number, path: string, content: string, proposalId?: number | null, create = false) =>
+      call<{ ok: true }>("PUT", `/api/files/${id}/content`, { path, content, proposalId, create }),
     remove:  (id: number, path: string, proposalId?: number | null) =>
       call<{ ok: true }>("DELETE", `/api/files/${id}/entry?path=${encodeURIComponent(path)}${proposalParam(proposalId)}`),
     mkdir:   (id: number, path: string, proposalId?: number | null) =>

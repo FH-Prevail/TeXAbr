@@ -353,7 +353,11 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
                     createdAt: ann.createdAt,
                 })),
             };
-            await api.writeFile( metadataPath, JSON.stringify(metadata, null, 2));
+            await api.writeFile(
+                metadataPath,
+                JSON.stringify(metadata, null, 2),
+                { create: true },
+            );
         }
         catch (error) {
             console.error('Error saving metadata:', error);
@@ -880,6 +884,92 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
         }
         focusEditor();
     };
+    const handleEntryRemoved = useCallback((removedPath: string) => {
+        const normalized = removedPath.replace(/\\/g, '/').replace(/\/+$/, '');
+        const isRemoved = (candidate: string) => {
+            const value = candidate.replace(/\\/g, '/').replace(/\/+$/, '');
+            return value === normalized || value.startsWith(`${normalized}/`);
+        };
+        const removedTabs = openTabs.filter(tab => isRemoved(tab.path));
+        const currentWasRemoved = Boolean(currentFile && isRemoved(currentFile.path));
+        if (removedTabs.length === 0 && !currentWasRemoved) {
+            return;
+        }
+
+        const removedPaths = new Set(removedTabs.map(tab => tab.path));
+        const newTabs = openTabs.filter(tab => !removedPaths.has(tab.path));
+        const oldIndex = currentFile
+            ? openTabs.findIndex(tab => tab.path === currentFile.path)
+            : -1;
+
+        setOpenTabs(newTabs);
+        setTabContents(prev => {
+            const next = new Map(prev);
+            for (const removed of removedPaths) next.delete(removed);
+            return next;
+        });
+        setTabAnnotations(prev => {
+            const next = new Map(prev);
+            for (const removed of removedPaths) next.delete(removed);
+            return next;
+        });
+        for (const candidate of Array.from(cursorPositionsRef.current.keys())) {
+            if (isRemoved(candidate)) cursorPositionsRef.current.delete(candidate);
+        }
+
+        if (!currentWasRemoved) return;
+        if (newTabs.length === 0) {
+            setCurrentFile(null);
+            setEditorContent('');
+            setAnnotations([]);
+            setShowAnnotationsPanel(false);
+            setAnnotationsHidden(true);
+            pendingCursorRef.current = null;
+            resetCompileNonce();
+            return;
+        }
+
+        const nextIndex = oldIndex > 0
+            ? Math.min(oldIndex - 1, newTabs.length - 1)
+            : 0;
+        const nextFile = newTabs[nextIndex];
+        setCurrentFile(nextFile);
+        setEditorContent(tabContents.get(nextFile.path) ?? '');
+        setAnnotations(tabAnnotations.get(nextFile.path) ?? []);
+        const storedPosition = cursorPositionsRef.current.get(nextFile.path);
+        pendingCursorRef.current = {
+            path: nextFile.path,
+            position: storedPosition ?? { lineNumber: 1, column: 1 },
+        };
+        const ext = nextFile.name.split('.').pop()?.toLowerCase() ?? '';
+        if (ext === 'tex' || ext === 'latex') triggerCompile();
+        else resetCompileNonce();
+    }, [
+        currentFile,
+        openTabs,
+        resetCompileNonce,
+        setAnnotations,
+        setAnnotationsHidden,
+        setCurrentFile,
+        setEditorContent,
+        setOpenTabs,
+        setTabAnnotations,
+        setTabContents,
+        tabAnnotations,
+        tabContents,
+        triggerCompile,
+    ]);
+
+    // Last line of defense if a structural event was missed during a network
+    // gap: the file-specific WebSocket closes with code 4004 and the hook
+    // reports "missing", so the stale tab is removed instead of reconnecting
+    // forever or recreating the deleted file.
+    useEffect(() => {
+        if (realtimeFile.status === 'missing' && currentFile) {
+            handleEntryRemoved(currentFile.path);
+        }
+    }, [currentFile, handleEntryRemoved, realtimeFile.status]);
+
     const handleTabClose = async (file: FileNode, event: React.MouseEvent) => {
         event.stopPropagation();
         // Save annotations before closing if this is the current file
@@ -1452,7 +1542,11 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
             }
 
             // Save versioned file
-            const writeResult = await api.writeFile( versionedFilePath, contentToSave);
+            const writeResult = await api.writeFile(
+                versionedFilePath,
+                contentToSave,
+                { create: true },
+            );
             if (!writeResult.success) {
                 showNotification('Instant Backup Failed', `Failed to save backup: ${writeResult.error}`, 'error');
                 return;
@@ -1788,6 +1882,7 @@ const AppContent: React.FC<{ projectId: number }> = ({ projectId }) => {
                                 projectPath={projectPath}
                                 onZipFolder={handleSaveFolderAsZip}
                                 onVersionFreeze={handleVersionFreeze}
+                                onEntryRemoved={handleEntryRemoved}
                                 refreshTrigger={fileExplorerRefreshTrigger}
                                 readOnly={isReadOnlyProject}
                             />

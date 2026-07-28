@@ -23,14 +23,14 @@ export interface RealtimeFileHandle {
   yText: Y.Text | null;
   doc: Y.Doc | null;
   awareness: WebsocketProvider["awareness"] | null;
-  status: "connecting" | "connected" | "disconnected";
+  status: "connecting" | "connected" | "disconnected" | "missing";
 }
 
 export function useRealtimeFile(projectId: number | null, filePath: string | null): RealtimeFileHandle {
   const [yText, setYText] = useState<Y.Text | null>(null);
   const [doc, setDoc] = useState<Y.Doc | null>(null);
   const [awareness, setAwareness] = useState<WebsocketProvider["awareness"] | null>(null);
-  const [status, setStatus] = useState<"connecting" | "connected" | "disconnected">("disconnected");
+  const [status, setStatus] = useState<"connecting" | "connected" | "disconnected" | "missing">("disconnected");
   // Bumping epochResetNonce restarts the effect, which destroys the existing
   // Y.Doc + provider and rebuilds at the (now-current) epoch. The actual
   // epoch fetch happens inside the effect.
@@ -66,6 +66,7 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
       // Reusing a cached epoch after a code-4000 close creates an infinite
       // stale-epoch reconnect loop for exactly one file.
       const r = await fetch(url, { credentials: "include", cache: "no-store" });
+      if (r.status === 404) return 0;
       if (!r.ok) throw new Error(`epoch fetch failed: ${r.status}`);
       const j = await r.json() as { epoch: number };
       if (!Number.isInteger(j.epoch) || j.epoch < 1) {
@@ -89,6 +90,10 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
         return;
       }
       if (cancelled) return;
+      if (epoch === 0) {
+        setYText(null); setDoc(null); setAwareness(null); setStatus("missing");
+        return;
+      }
 
       ydoc = new Y.Doc();
       const wsProto = window.location.protocol === "https:" ? "wss" : "ws";
@@ -117,17 +122,18 @@ export function useRealtimeFile(projectId: number | null, filePath: string | nul
       // bump epochResetNonce, which restarts this effect from scratch. The
       // fresh effect run refetches the epoch and builds a new room.
       closeHandler = (event: CloseEvent | null) => {
-        if (cancelled || event?.code !== 4000) return;
+        if (cancelled || (event?.code !== 4000 && event?.code !== 4004)) return;
         if (statusHandler) provider?.off("status", statusHandler);
         if (closeHandler) provider?.off("connection-close", closeHandler);
         try { provider?.disconnect(); } catch { /* already disconnected */ }
         try { provider?.destroy(); } catch { /* already destroyed */ }
         try { ydoc?.destroy(); } catch { /* already destroyed */ }
         providerRef.current = null;
-        setYText(null); setDoc(null); setAwareness(null); setStatus("disconnected");
+        const missing = event.code === 4004;
+        setYText(null); setDoc(null); setAwareness(null); setStatus(missing ? "missing" : "disconnected");
         // Yield briefly so a server-authoritative filesystem operation can
         // finish its final epoch bump before this tab asks for the new value.
-        scheduleRestart(150);
+        if (!missing) scheduleRestart(150);
       };
       provider.on("connection-close", closeHandler);
 

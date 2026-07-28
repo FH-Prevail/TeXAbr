@@ -16,8 +16,29 @@ import { api as rest } from "../api/client";
 let currentProjectId: number | null = null;
 let currentProposalId: number | null = null;
 let lastServerPdfPath: string | null = null;
+let projectEventSource: EventSource | null = null;
+
+interface FilesystemEvent {
+  root: string;
+  event: "resync" | "upsert" | "delete" | "rename";
+  path?: string;
+  to?: string;
+  revision?: number;
+}
+
+const filesystemListeners = new Set<(payload: FilesystemEvent) => void>();
+
+function emitFilesystemEvent(payload: FilesystemEvent) {
+  for (const listener of filesystemListeners) {
+    try { listener(payload); } catch { /* one UI listener must not break others */ }
+  }
+}
 
 export function setShimProject(id: number) {
+  if (currentProjectId !== id && projectEventSource) {
+    projectEventSource.close();
+    projectEventSource = null;
+  }
   currentProjectId = id;
   currentProposalId = null;
   lastServerPdfPath = null;
@@ -136,9 +157,9 @@ async function readBinaryFile(filePath: string) {
   return readFileBase64(filePath);
 }
 
-async function writeFile(filePath: string, content: string) {
+async function writeFile(filePath: string, content: string, options?: { create?: boolean }) {
   try {
-    await rest.files.write(pid(), rel(filePath), content, currentProposalId);
+    await rest.files.write(pid(), rel(filePath), content, currentProposalId, options?.create === true);
     return { success: true };
   } catch (err) {
     return { success: false, error: (err as Error).message };
@@ -147,7 +168,11 @@ async function writeFile(filePath: string, content: string) {
 
 async function createFile(filePath: string) {
   try {
-    await rest.files.write(pid(), rel(filePath), "", currentProposalId);
+    const relPath = rel(filePath);
+    await rest.files.write(pid(), relPath, "", currentProposalId, true);
+    if (currentProposalId == null) {
+      emitFilesystemEvent({ root: shimProjectRoot(), event: "upsert", path: abs(relPath) });
+    }
     return { success: true };
   } catch (err) {
     return { success: false, error: (err as Error).message };
@@ -156,7 +181,15 @@ async function createFile(filePath: string) {
 
 async function deletePath(filePath: string) {
   try {
-    await rest.files.remove(pid(), rel(filePath), currentProposalId);
+    const relPath = rel(filePath);
+    await rest.files.remove(pid(), relPath, currentProposalId);
+    if (currentProposalId == null) {
+      emitFilesystemEvent({
+        root: shimProjectRoot(),
+        event: "delete",
+        path: abs(relPath),
+      });
+    }
     return { success: true };
   } catch (err) {
     return { success: false, error: (err as Error).message };
@@ -165,7 +198,17 @@ async function deletePath(filePath: string) {
 
 async function renamePath(oldPath: string, newPath: string) {
   try {
-    await rest.files.rename(pid(), rel(oldPath), rel(newPath), currentProposalId);
+    const from = rel(oldPath);
+    const to = rel(newPath);
+    await rest.files.rename(pid(), from, to, currentProposalId);
+    if (currentProposalId == null) {
+      emitFilesystemEvent({
+        root: shimProjectRoot(),
+        event: "rename",
+        path: abs(from),
+        to: abs(to),
+      });
+    }
     return { success: true };
   } catch (err) {
     return { success: false, error: (err as Error).message };
@@ -174,7 +217,11 @@ async function renamePath(oldPath: string, newPath: string) {
 
 async function createDirectory(dirPath: string) {
   try {
-    await rest.files.mkdir(pid(), rel(dirPath), currentProposalId);
+    const relPath = rel(dirPath);
+    await rest.files.mkdir(pid(), relPath, currentProposalId);
+    if (currentProposalId == null) {
+      emitFilesystemEvent({ root: shimProjectRoot(), event: "upsert", path: abs(relPath) });
+    }
     return { success: true };
   } catch (err) {
     return { success: false, error: (err as Error).message };
@@ -189,6 +236,9 @@ async function copyPaths(sources: string[], destination: string) {
       rel(destination),
       currentProposalId,
     );
+    if (currentProposalId == null) {
+      emitFilesystemEvent({ root: shimProjectRoot(), event: "resync" });
+    }
     return { success: true };
   } catch (err) {
     return { success: false, error: (err as Error).message };
@@ -218,6 +268,9 @@ async function uploadFiles(
     } catch (err) {
       errors.push({ path: item.relPath, error: (err as Error).message });
     }
+  }
+  if (currentProposalId == null && uploaded > 0) {
+    emitFilesystemEvent({ root: shimProjectRoot(), event: "resync" });
   }
   return { success: errors.length === 0, uploaded, errors };
 }
@@ -269,20 +322,53 @@ async function readDirectory(dirPath: string) {
 }
 
 // ----------------------------------------------------------------------------
-// Filesystem watching — Openotex listens for changes to refresh the tree.
-// We can't get push notifications without a websocket; until that exists,
-// invoke an interval-based no-op so the listener registers but never fires.
-// Components fall back to manual refresh which works fine.
+// Project structure events. Contents use per-file Yjs rooms; create/delete/
+// rename/upload are server-authoritative metadata and arrive over one SSE
+// stream per editor. EventSource automatically reconnects after network blips,
+// and the server starts every connection with a full-tree resync event.
 // ----------------------------------------------------------------------------
 
 function watchPath(_root: string) {
+  if (currentProjectId == null) {
+    return Promise.resolve({ success: false, error: "project id not set" });
+  }
+  if (projectEventSource) return Promise.resolve({ success: true });
+
+  const source = new EventSource(`/api/projects/${currentProjectId}/events`, {
+    withCredentials: true,
+  });
+  projectEventSource = source;
+  source.onmessage = (message) => {
+    try {
+      // Proposal worktrees are intentionally isolated from the live main
+      // project. Main-tree events must not close proposal tabs with the same
+      // relative path.
+      if (currentProposalId != null) return;
+      const event = JSON.parse(message.data) as {
+        type: FilesystemEvent["event"];
+        path?: string;
+        to?: string;
+        revision?: number;
+      };
+      emitFilesystemEvent({
+        root: shimProjectRoot(),
+        event: event.type,
+        path: event.path ? abs(event.path) : undefined,
+        to: event.to ? abs(event.to) : undefined,
+        revision: event.revision,
+      });
+    } catch { /* malformed event; the next resync repairs the tree */ }
+  };
   return Promise.resolve({ success: true });
 }
 function unwatchPath() {
+  projectEventSource?.close();
+  projectEventSource = null;
   return Promise.resolve({ success: true });
 }
-function onFilesystemEvent(_listener: (payload: { event: string; path: string; root: string }) => void) {
-  return () => {};
+function onFilesystemEvent(listener: (payload: FilesystemEvent) => void) {
+  filesystemListeners.add(listener);
+  return () => filesystemListeners.delete(listener);
 }
 
 // ----------------------------------------------------------------------------

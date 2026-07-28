@@ -32,11 +32,12 @@ interface FileExplorerProps {
   projectPath: string;
   onZipFolder: (folderPath: string) => void;
   onVersionFreeze: (file: FileNode) => void;
+  onEntryRemoved?: (path: string) => void;
   refreshTrigger?: number;
   readOnly?: boolean;
 }
 
-const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, onZipFolder, onVersionFreeze, refreshTrigger, readOnly = false }) => {
+const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, onZipFolder, onVersionFreeze, onEntryRemoved, refreshTrigger, readOnly = false }) => {
   const [files, setFiles] = useState<FileNode[]>([]);
   const [selectedFile, setSelectedFile] = useState<FileNode | null>(null);
   const [contextMenu, setContextMenu] = useState<{
@@ -155,9 +156,12 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
       return;
     }
 
-    const dispose = api.onFilesystemEvent((payload: { root?: string; path?: string }) => {
+    const dispose = api.onFilesystemEvent((payload: { root?: string; path?: string; event?: string }) => {
       if (!payload || payload.root !== projectPath) {
         return;
+      }
+      if ((payload.event === "delete" || payload.event === "rename") && payload.path) {
+        onEntryRemoved?.(payload.path);
       }
 
       if (reloadTimeoutRef.current) {
@@ -176,7 +180,7 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
       }
       dispose?.();
     };
-  }, [projectPath, loadDirectory]);
+  }, [projectPath, loadDirectory, onEntryRemoved]);
 
   const updateNodeChildren = (
     nodes: FileNode[],
@@ -627,9 +631,10 @@ const FileExplorer: React.FC<FileExplorerProps> = ({ onFileSelect, projectPath, 
       title: isDirectory ? 'Delete Folder' : 'Delete File',
       message: `Are you sure you want to delete the ${isDirectory ? 'folder' : 'file'} "${fileToDelete.name}"? This action cannot be undone.`,
       onConfirm: async () => {
-      const result = await (window as any).api.deletePath(fileToDelete.path);
+        const result = await (window as any).api.deletePath(fileToDelete.path);
 
         if (result.success) {
+          onEntryRemoved?.(fileToDelete.path);
           if (refreshTarget) {
             refreshDirectory(refreshTarget);
           } else if (projectPath) {

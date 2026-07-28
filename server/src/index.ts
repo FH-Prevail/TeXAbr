@@ -254,6 +254,17 @@ async function main() {
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       const scopedLog = log.child({ module: "yjs", user: user.username, projectId, relPath });
+      try {
+        if (!fs.statSync(filePath).isFile()) {
+          scopedLog.info("yjs: missing file — closing");
+          ws.close(4004, "file missing");
+          return;
+        }
+      } catch {
+        scopedLog.info("yjs: missing file — closing");
+        ws.close(4004, "file missing");
+        return;
+      }
       if (clientEpoch !== currentEpoch) {
         scopedLog.info("yjs: epoch mismatch — closing", { clientEpoch, currentEpoch });
         try { ws.close(4000, "epoch mismatch"); } catch { /* already closed */ }

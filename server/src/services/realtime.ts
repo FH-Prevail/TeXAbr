@@ -210,9 +210,22 @@ export function makeRealtime(rootLog: Logger, cfg: Config): RealtimeService {
       room.saveTimer = null;
     }
     const text = room.doc.getText("content").toString();
+    // A Yjs room may outlive a filesystem entry briefly. Deletion is
+    // authoritative: never turn a stale open tab into an implicit create.
+    // File creation happens only through the authenticated HTTP routes.
+    let current: fs.Stats;
+    try {
+      current = fs.statSync(room.filePath);
+    } catch {
+      room.log.info("realtime: flush skipped for missing path", { key: room.key });
+      return;
+    }
+    if (!current.isFile()) {
+      room.log.info("realtime: flush skipped for non-file path", { key: room.key });
+      return;
+    }
     try {
       // Plain text: what pdflatex, backup tools, and external viewers read.
-      fs.mkdirSync(path.dirname(room.filePath), { recursive: true });
       fs.writeFileSync(room.filePath, text, "utf8");
 
       // Binary CRDT state: what re-hydrates the room next time someone opens
